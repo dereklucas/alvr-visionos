@@ -111,12 +111,153 @@ class Renderer {
     var videoFrameDepthPipelineState: MTLRenderPipelineState!
     var fullscreenQuadBuffer:MTLBuffer!
     var unitVectorXYZBuffer:MTLBuffer!
-#if PERF_HUD
     var hudPipelineState: MTLRenderPipelineState!
     var hudQuadBuffer: MTLBuffer!
     var depthStateAlwaysNoWrite: MTLDepthStencilState!
+#if PERF_HUD
     var performanceHudRenderer: PerformanceHudRenderer?
 #endif
+
+    func renderModeSwitchOverlay(commandBuffer: MTLCommandBuffer, renderTargetColor: MTLTexture, renderTargetDepth: MTLTexture, viewports: [MTLViewport], rasterizationRateMap: MTLRasterizationRateMap?, simdDeviceAnchor: simd_float4x4) {
+        guard let overlayRenderer = modeSwitchOverlayRenderer else {
+            return
+        }
+        let overlayState = WorldTracker.shared.modeSwitchOverlayState
+        if !(overlayState.isActive || overlayState.showDebugQuad) {
+            return
+        }
+        let overlayTexture = overlayRenderer.updateIfNeeded(state: overlayState)
+        if overlayTexture == nil && !overlayState.showDebugQuad {
+            return
+        }
+
+        selectNextPlaneUniformBuffer()
+        let headPosition = simdDeviceAnchor.columns.3.asFloat3()
+        var forward = -simdDeviceAnchor.columns.2.asFloat3()
+        forward.y = 0.0
+        if simd_length(forward) < 0.001 {
+            forward = simd_float3(0.0, 0.0, -1.0)
+        } else {
+            forward = simd_normalize(forward)
+        }
+        let up = simd_float3(0.0, 1.0, 0.0)
+        var right = simd_cross(up, forward)
+        if simd_length(right) < 0.001 {
+            right = simd_float3(1.0, 0.0, 0.0)
+        } else {
+            right = simd_normalize(right)
+        }
+
+        let orientation = simd_float4x4(simd_float4(right, 0.0),
+                                        simd_float4(up, 0.0),
+                                        simd_float4(forward, 0.0),
+                                        simd_float4(0.0, 0.0, 0.0, 1.0))
+        let safeZone = overlayState.safeZone
+        let safeX = max(safeZone.x.upperBound - safeZone.x.lowerBound, 0.05)
+        let safeY = max(safeZone.y.upperBound - safeZone.y.lowerBound, 0.05)
+        let safeZ = max(safeZone.z.upperBound - safeZone.z.lowerBound, 0.15)
+        let centerX = (safeZone.x.lowerBound + safeZone.x.upperBound) * 0.5
+        let centerY = (safeZone.y.lowerBound + safeZone.y.upperBound) * 0.5
+        let centerZ = (safeZone.z.lowerBound + safeZone.z.upperBound) * 0.5
+        let safePosition = headPosition
+            + (right * centerX)
+            + (up * centerY)
+            + (forward * max(centerZ, safeZ * 0.5))
+        let safeScale = simd_float4x4(simd_float4(safeX * 1.2, 0.0, 0.0, 0.0),
+                                      simd_float4(0.0, safeY * 1.2, 0.0, 0.0),
+                                      simd_float4(0.0, 0.0, 1.0, 0.0),
+                                      simd_float4(0.0, 0.0, 0.0, 1.0))
+        let hudScale = simd_float4x4(simd_float4(0.18, 0.0, 0.0, 0.0),
+                                     simd_float4(0.0, 0.18, 0.0, 0.0),
+                                     simd_float4(0.0, 0.0, 1.0, 0.0),
+                                     simd_float4(0.0, 0.0, 0.0, 1.0))
+        self.planeUniforms[0].planeDoProximity = 0.0
+
+        let renderPassDescriptor = MTLRenderPassDescriptor()
+        renderPassDescriptor.colorAttachments[0].texture = renderTargetColor
+        renderPassDescriptor.colorAttachments[0].loadAction = .load
+        renderPassDescriptor.colorAttachments[0].storeAction = .store
+        renderPassDescriptor.depthAttachment.texture = renderTargetDepth
+        renderPassDescriptor.depthAttachment.loadAction = .load
+        renderPassDescriptor.depthAttachment.storeAction = .dontCare
+        renderPassDescriptor.depthAttachment.clearDepth = 0.0
+        renderPassDescriptor.rasterizationRateMap = rasterizationRateMap
+        renderPassDescriptor.renderTargetArrayLength = viewports.count
+
+        guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
+            fatalError("Failed to create Mode Switch HUD render encoder")
+        }
+
+        renderEncoder.label = "Mode Switch HUD Render Encoder"
+        renderEncoder.setCullMode(.none)
+        renderEncoder.setFrontFacing(.counterClockwise)
+        renderEncoder.setViewports(viewports)
+        renderEncoder.setVertexBuffer(dynamicUniformBuffer, offset: uniformBufferOffset, index: BufferIndex.uniforms.rawValue)
+        renderEncoder.setVertexBuffer(dynamicPlaneUniformBuffer, offset: planeUniformBufferOffset, index: BufferIndex.planeUniforms.rawValue)
+
+        if viewports.count > 1 {
+            var viewMappings = (0..<viewports.count).map {
+                MTLVertexAmplificationViewMapping(viewportArrayIndexOffset: UInt32($0),
+                                                  renderTargetArrayIndexOffset: UInt32($0))
+            }
+            renderEncoder.setVertexAmplificationCount(viewports.count, viewMappings: &viewMappings)
+        }
+
+        renderEncoder.setDepthStencilState(depthStateAlwaysNoWrite)
+#if !targetEnvironment(simulator)
+        renderEncoder.setDepthClipMode(.clamp)
+#endif
+        renderEncoder.setVertexBuffer(hudQuadBuffer, offset: 0, index: VertexAttribute.position.rawValue)
+        renderEncoder.setVertexBuffer(hudQuadBuffer, offset: (3 * 4) * 4, index: VertexAttribute.texcoord.rawValue)
+        if overlayState.showDebugQuad {
+            self.planeUniforms[0].planeTransform = safePosition.asFloat4x4() * orientation * safeScale
+            renderEncoder.setRenderPipelineState(pipelineState)
+            self.planeUniforms[0].planeColor = simd_float4(0.0, 1.0, 1.0, 1.0)
+            renderEncoder.setTriangleFillMode(.lines)
+            renderEncoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+            let fallbackPos = headPosition + (forward * 0.4)
+            let fallbackScale = simd_float4x4(simd_float4(0.18, 0.0, 0.0, 0.0),
+                                              simd_float4(0.0, 0.18, 0.0, 0.0),
+                                              simd_float4(0.0, 0.0, 1.0, 0.0),
+                                              simd_float4(0.0, 0.0, 0.0, 1.0))
+            self.planeUniforms[0].planeTransform = fallbackPos.asFloat4x4() * orientation * fallbackScale
+            self.planeUniforms[0].planeColor = simd_float4(1.0, 0.0, 1.0, 1.0)
+            renderEncoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        }
+        if overlayState.showDebugQuad {
+            let slotOffset = max(0.2, safeX * 2.0)
+            let slotScale = simd_float4x4(simd_float4(0.08, 0.0, 0.0, 0.0),
+                                          simd_float4(0.0, 0.08, 0.0, 0.0),
+                                          simd_float4(0.0, 0.0, 1.0, 0.0),
+                                          simd_float4(0.0, 0.0, 0.0, 1.0))
+            func drawSlot(_ position: simd_float3, _ color: simd_float4) {
+                self.planeUniforms[0].planeTransform = position.asFloat4x4() * orientation * slotScale
+                self.planeUniforms[0].planeColor = color
+                renderEncoder.setRenderPipelineState(pipelineState)
+                renderEncoder.setTriangleFillMode(.lines)
+                renderEncoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+            }
+            let selected = overlayState.selectedSlot
+            let anchor = overlayState.debugAnchorValid ? overlayState.debugAnchorWorldPosition : safePosition
+            let forwardPos = anchor + (forward * slotOffset)
+            let downPos = anchor + (up * -slotOffset)
+            let leftPos = anchor + (right * -slotOffset)
+            let rightPos = anchor + (right * slotOffset)
+            drawSlot(forwardPos, selected == .forward ? simd_float4(1.0, 1.0, 1.0, 1.0) : simd_float4(0.0, 1.0, 0.0, 1.0))
+            drawSlot(downPos, selected == .down ? simd_float4(1.0, 1.0, 1.0, 1.0) : simd_float4(1.0, 0.8, 0.0, 1.0))
+            drawSlot(leftPos, selected == .left ? simd_float4(1.0, 1.0, 1.0, 1.0) : simd_float4(0.2, 0.6, 1.0, 1.0))
+            drawSlot(rightPos, selected == .right ? simd_float4(1.0, 1.0, 1.0, 1.0) : simd_float4(1.0, 0.4, 0.2, 1.0))
+        }
+        renderEncoder.setTriangleFillMode(.fill)
+        if let overlayTexture {
+            renderEncoder.setRenderPipelineState(hudPipelineState)
+            self.planeUniforms[0].planeTransform = safePosition.asFloat4x4() * orientation * hudScale
+            renderEncoder.setFragmentTexture(overlayTexture, index: TextureIndex.color.rawValue)
+            renderEncoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        }
+        renderEncoder.endEncoding()
+    }
+    var modeSwitchOverlayRenderer: ModeSwitchOverlayRenderer?
     var encodingGamma: Float = 1.0
     var lastReconfigureTime: Double = 0.0
     
@@ -215,7 +356,6 @@ class Renderer {
         } catch {
             fatalError("Unable to compile render pipeline state.  Error info: \(error)")
         }
-#if PERF_HUD
         do {
             hudPipelineState = try Renderer.buildRenderPipelineWithDevice(device: device,
                                                                           mtlVertexDescriptor: mtlVertexDescriptor,
@@ -227,18 +367,15 @@ class Renderer {
         } catch {
             fatalError("Unable to compile HUD render pipeline state.  Error info: \(error)")
         }
-#endif
 
         let depthStateDescriptorAlways = MTLDepthStencilDescriptor()
         depthStateDescriptorAlways.depthCompareFunction = MTLCompareFunction.always
         depthStateDescriptorAlways.isDepthWriteEnabled = true
         self.depthStateAlways = device.makeDepthStencilState(descriptor:depthStateDescriptorAlways)!
-#if PERF_HUD
         let depthStateDescriptorAlwaysNoWrite = MTLDepthStencilDescriptor()
         depthStateDescriptorAlwaysNoWrite.depthCompareFunction = .always
         depthStateDescriptorAlwaysNoWrite.isDepthWriteEnabled = false
         self.depthStateAlwaysNoWrite = device.makeDepthStencilState(descriptor: depthStateDescriptorAlwaysNoWrite)!
-#endif
         
         let depthStateDescriptorGreater = MTLDepthStencilDescriptor()
         depthStateDescriptorGreater.depthCompareFunction = MTLCompareFunction.greater
@@ -251,11 +388,9 @@ class Renderer {
         fullscreenQuadVertices.withUnsafeBytes {
             fullscreenQuadBuffer = device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
         }
-#if PERF_HUD
         hudQuadVertices.withUnsafeBytes {
             hudQuadBuffer = device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
         }
-#endif
         
         unitVectorXYZVertices.withUnsafeBytes {
             unitVectorXYZBuffer = device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
@@ -269,6 +404,7 @@ class Renderer {
                 viewCount: layerRenderer?.properties.viewCount ?? renderViewCount
         )
 
+        modeSwitchOverlayRenderer = ModeSwitchOverlayRenderer(device: device)
 #if PERF_HUD
         performanceHudRenderer = PerformanceHudRenderer(device: device)
 #endif
@@ -1511,44 +1647,86 @@ class Renderer {
 
 #if PERF_HUD
     func renderPerformanceHud(commandBuffer: MTLCommandBuffer, renderTargetColor: MTLTexture, renderTargetDepth: MTLTexture, viewports: [MTLViewport], rasterizationRateMap: MTLRasterizationRateMap?, simdDeviceAnchor: simd_float4x4) {
-        guard let hudTexture = performanceHudRenderer?.updateIfNeeded() else {
-            return
-        }
-
+        let hudTexture = performanceHudRenderer?.updateIfNeeded()
+        let useDebugQuad = hudTexture == nil
         selectNextPlaneUniformBuffer()
         let worldFromSteamVR = WorldTracker.shared.worldTrackingSteamVRTransform
         let handPose = WorldTracker.shared.lastLeftHandPose
         let handWorld = worldFromSteamVR * handPose.asFloat4x4()
         let handPosition = handWorld.columns.3.asFloat3()
-        let headPosition = simdDeviceAnchor.columns.3.asFloat3()
-        let toHead = headPosition - handPosition
-        let toHeadLength = simd_length(toHead)
-        let forward = toHeadLength < 0.001 ? simd_normalize(-simdDeviceAnchor.columns.2.asFloat3()) : (toHead / toHeadLength)
-        var up = simd_float3(0.0, 1.0, 0.0)
-        var right = simd_cross(up, forward)
-        let rightLength = simd_length(right)
-        if rightLength < 0.001 {
-            right = simd_float3(1.0, 0.0, 0.0)
-        } else {
-            right /= rightLength
+        var handRight = simd_normalize(handWorld.columns.0.asFloat3())
+        let handUp = simd_normalize(handWorld.columns.1.asFloat3())
+        let handForward = simd_normalize(handWorld.columns.2.asFloat3())
+        if simd_length(handRight) < 0.001 || simd_length(handUp) < 0.001 || simd_length(handForward) < 0.001 {
+            return
         }
-        up = simd_cross(forward, right)
+        handRight = simd_normalize(handRight)
+        // Hand axes derived from the current left-hand pose.
+        // thumbAxis: toward thumb side of the hand (local +X).
+        // palmAxis: palm normal (local +Y).
+        // elbowAxis: from fingers toward wrist/elbow (local -Z).
+        let thumbAxis = -handForward
+        let palmAxis = handRight
+        let elbowAxis = handUp
 
-        let orientation = simd_float4x4(simd_float4(right, 0.0),
-                                        simd_float4(up, 0.0),
-                                        simd_float4(forward, 0.0),
+        // Panel axes in world space:
+        // panelFront: the face normal of the panel (should align with palmAxis).
+        // panelTopEdge: the top edge of the panel (should align with elbowAxis).
+        // panelRightEdge: the right edge of the panel (perpendicular to both).
+        let panelFront = simd_normalize(-palmAxis)
+        var panelTopEdge = simd_normalize(-elbowAxis)
+        var panelRightEdge = simd_normalize(-thumbAxis)
+        let palmTwist = simd_quatf(angle: Float.pi / 180.0 * 20.0, axis: simd_normalize(palmAxis))
+        panelTopEdge = simd_normalize(palmTwist.act(panelTopEdge))
+        panelRightEdge = simd_normalize(palmTwist.act(panelRightEdge))
+        let forearmDir = panelTopEdge
+
+#if DEBUG_ALVR_TRACKING
+        WorldTracker.shared.lockDebuggables()
+        let handAxisMat = simd_float4x4(simd_float4(thumbAxis, 0.0),
+                                        simd_float4(palmAxis, 0.0),
+                                        simd_float4(elbowAxis, 0.0),
+                                        simd_float4(handPosition, 1.0))
+        WorldTracker.shared.addDebuggablePose(handAxisMat, 0.06)
+        let panelAxisMat = simd_float4x4(simd_float4(panelRightEdge, 0.0),
+                                         simd_float4(panelTopEdge, 0.0),
+                                         simd_float4(panelFront, 0.0),
+                                         simd_float4(handPosition, 1.0))
+        WorldTracker.shared.addDebuggablePose(panelAxisMat, 0.05)
+        WorldTracker.shared.unlockDebuggables()
+#endif
+
+        // Orientation uses panelRightEdge (X), panelTopEdge (Y), panelFront (Z).
+        let orientation = simd_float4x4(simd_float4(panelRightEdge, 0.0),
+                                        simd_float4(panelTopEdge, 0.0),
+                                        simd_float4(panelFront, 0.0),
                                         simd_float4(0.0, 0.0, 0.0, 1.0))
-        let offset = (forward * 0.08) + (up * 0.02) + (right * 0.02)
+        // Position offsets:
+        // offsetIn: shift toward the inner forearm (away from thumb).
+        // offsetArm: shift toward elbow along the forearm.
+        // offsetDown: move slightly into the arm to sit on the surface.
+        let offsetIn = simd_float3()
+        let offsetArm = -forearmDir * 0.10
+        let offsetDown = panelFront * 0.025
+        let offset = offsetIn + offsetArm + offsetDown
         let position = handPosition + offset
         let translation = position.asFloat4x4()
-        let scale = simd_float4x4(simd_float4(0.12, 0.0, 0.0, 0.0),
-                                  simd_float4(0.0, 0.07, 0.0, 0.0),
+        let sizeY: Float = 0.07
+        let aspect: Float
+        if let hudTexture, hudTexture.height > 0 {
+            aspect = Float(hudTexture.width) / Float(hudTexture.height)
+        } else {
+            aspect = 240.0 / 250.0
+        }
+        let sizeX: Float = sizeY * aspect
+        let scale = simd_float4x4(simd_float4(sizeX, 0.0, 0.0, 0.0),
+                                  simd_float4(0.0, sizeY, 0.0, 0.0),
                                   simd_float4(0.0, 0.0, 1.0, 0.0),
                                   simd_float4(0.0, 0.0, 0.0, 1.0))
         let transform = translation * orientation * scale
 
         self.planeUniforms[0].planeTransform = transform
-        self.planeUniforms[0].planeColor = simd_float4(1.0, 1.0, 1.0, 1.0)
+        self.planeUniforms[0].planeColor = useDebugQuad ? simd_float4(1.0, 0.0, 1.0, 0.9) : simd_float4(1.0, 1.0, 1.0, 1.0)
         self.planeUniforms[0].planeDoProximity = 0.0
 
         let renderPassDescriptor = MTLRenderPassDescriptor()
@@ -1581,14 +1759,16 @@ class Renderer {
             renderEncoder.setVertexAmplificationCount(viewports.count, viewMappings: &viewMappings)
         }
 
-        renderEncoder.setRenderPipelineState(hudPipelineState)
+        renderEncoder.setRenderPipelineState(useDebugQuad ? pipelineState : hudPipelineState)
         renderEncoder.setDepthStencilState(depthStateAlwaysNoWrite)
 #if !targetEnvironment(simulator)
         renderEncoder.setDepthClipMode(.clamp)
 #endif
         renderEncoder.setVertexBuffer(hudQuadBuffer, offset: 0, index: VertexAttribute.position.rawValue)
         renderEncoder.setVertexBuffer(hudQuadBuffer, offset: (3 * 4) * 4, index: VertexAttribute.texcoord.rawValue)
-        renderEncoder.setFragmentTexture(hudTexture, index: TextureIndex.color.rawValue)
+        if let hudTexture {
+            renderEncoder.setFragmentTexture(hudTexture, index: TextureIndex.color.rawValue)
+        }
         renderEncoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         renderEncoder.endEncoding()
     }
@@ -1758,5 +1938,6 @@ class Renderer {
             renderPerformanceHud(commandBuffer: commandBuffer, renderTargetColor: renderTargetColor, renderTargetDepth: renderTargetDepth, viewports: viewports, rasterizationRateMap: rasterizationRateMap, simdDeviceAnchor: simdDeviceAnchor)
         }
 #endif
+        renderModeSwitchOverlay(commandBuffer: commandBuffer, renderTargetColor: renderTargetColor, renderTargetDepth: renderTargetDepth, viewports: viewports, rasterizationRateMap: rasterizationRateMap, simdDeviceAnchor: simdDeviceAnchor)
     }
 }

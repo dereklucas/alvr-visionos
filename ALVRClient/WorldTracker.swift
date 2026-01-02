@@ -438,11 +438,20 @@ class WorldTracker {
     var leftPinchEyeDelta = simd_float3()
     var rightPinchEyeDelta = simd_float3()
     var floorCorrectionTransform = simd_float3()
+
+    var torsoYaw: Float = 0.0
+    var lastTorsoYawUpdate: Double = 0.0
     
     var leftSkeletonDisableHysteresis = 0.0
     var rightSkeletonDisableHysteresis = 0.0
     
     var pinchesAreFromRealityKit = false
+    let clutchRecognizer = GestureClutchRecognizer()
+    let modeManager = ModeManager.shared
+    var modeSwitchOverlayState = ModeSwitchOverlayState.inactive(currentMode: .handsSafe)
+    var debugModeSwitchLogging = true
+    private var lastClutchActive = false
+    private var lastClutchSlot: GestureClutchSlot? = nil
     var eyeX: Float = 0.0
     var eyeY: Float = 0.0
     var eyeIsMipmapMethod: Bool = true
@@ -1441,6 +1450,114 @@ class WorldTracker {
         
         return ret
     }
+
+    func updateTorsoYaw(headForwardWorld: simd_float3, now: Double) -> Float {
+        var forward = headForwardWorld
+        forward.y = 0.0
+        if simd_length(forward) < 0.0001 {
+            return torsoYaw
+        }
+        forward = simd_normalize(forward)
+        let targetYaw = atan2f(forward.x, -forward.z)
+        let dt = max(now - lastTorsoYawUpdate, 0.0)
+        lastTorsoYawUpdate = now
+        let alpha = Float(1.0 - exp(-dt / 0.5))
+        var delta = targetYaw - torsoYaw
+        while delta > Float.pi {
+            delta -= 2.0 * Float.pi
+        }
+        while delta < -Float.pi {
+            delta += 2.0 * Float.pi
+        }
+        torsoYaw += delta * alpha
+        return torsoYaw
+    }
+
+    private struct HandInputValues {
+        var triggerValue: Float
+        var gripValue: Float
+        var thumbstickX: Float
+        var thumbstickY: Float
+    }
+
+    private func handInputValues(hand: HandAnchor, headTransform: simd_float4x4, steamVrFromApple: simd_float4x4) -> HandInputValues? {
+        guard hand.isTracked, let skeleton = hand.handSkeleton else {
+            return nil
+        }
+
+        guard let wrist = jointWorldPosition(hand: hand, joint: .wrist, skeleton: skeleton, steamVrFromApple: steamVrFromApple),
+              let middleKnuckle = jointWorldPosition(hand: hand, joint: .middleFingerKnuckle, skeleton: skeleton, steamVrFromApple: steamVrFromApple),
+              let middleMetacarpal = jointWorldPosition(hand: hand, joint: .middleFingerMetacarpal, skeleton: skeleton, steamVrFromApple: steamVrFromApple),
+              let indexTip = jointWorldPosition(hand: hand, joint: .indexFingerTip, skeleton: skeleton, steamVrFromApple: steamVrFromApple),
+              let indexKnuckle = jointWorldPosition(hand: hand, joint: .indexFingerKnuckle, skeleton: skeleton, steamVrFromApple: steamVrFromApple),
+              let middleTip = jointWorldPosition(hand: hand, joint: .middleFingerTip, skeleton: skeleton, steamVrFromApple: steamVrFromApple),
+              let ringTip = jointWorldPosition(hand: hand, joint: .ringFingerTip, skeleton: skeleton, steamVrFromApple: steamVrFromApple),
+              let ringKnuckle = jointWorldPosition(hand: hand, joint: .ringFingerKnuckle, skeleton: skeleton, steamVrFromApple: steamVrFromApple),
+              let littleTip = jointWorldPosition(hand: hand, joint: .littleFingerTip, skeleton: skeleton, steamVrFromApple: steamVrFromApple),
+              let littleKnuckle = jointWorldPosition(hand: hand, joint: .littleFingerKnuckle, skeleton: skeleton, steamVrFromApple: steamVrFromApple) else {
+            return nil
+        }
+
+        let palmCenter = (middleMetacarpal + middleKnuckle) * 0.5
+        let indexCurl = fingerCurl(tip: indexTip, knuckle: indexKnuckle, palm: palmCenter)
+        let middleCurl = fingerCurl(tip: middleTip, knuckle: middleKnuckle, palm: palmCenter)
+        let ringCurl = fingerCurl(tip: ringTip, knuckle: ringKnuckle, palm: palmCenter)
+        let littleCurl = fingerCurl(tip: littleTip, knuckle: littleKnuckle, palm: palmCenter)
+
+        let triggerValue = indexCurl
+        let gripValue = (middleCurl + ringCurl + littleCurl) / 3.0
+
+        let headRight = simd_normalize(headTransform.columns.0.asFloat3())
+        let headUp = simd_normalize(headTransform.columns.1.asFloat3())
+        let handForward = simd_normalize(middleKnuckle - wrist)
+        let rawX = simd_dot(handForward, headRight) * 1.6
+        let rawY = simd_dot(handForward, headUp) * 1.6
+        let thumbstickX = applyDeadzone(clamp(rawX, min: -1.0, max: 1.0), deadzone: 0.15)
+        let thumbstickY = applyDeadzone(clamp(rawY, min: -1.0, max: 1.0), deadzone: 0.15)
+
+        return HandInputValues(triggerValue: clamp(triggerValue, min: 0.0, max: 1.0),
+                               gripValue: clamp(gripValue, min: 0.0, max: 1.0),
+                               thumbstickX: thumbstickX,
+                               thumbstickY: thumbstickY)
+    }
+
+    private func jointWorldPosition(hand: HandAnchor, joint: HandSkeleton.JointName, skeleton: HandSkeleton, steamVrFromApple: simd_float4x4) -> simd_float3? {
+        let jointData = skeleton.joint(joint)
+        let jointTransform = steamVrFromApple * hand.originFromAnchorTransform * jointData.anchorFromJointTransform
+        return jointTransform.columns.3.asFloat3()
+    }
+
+    private func fingerCurl(tip: simd_float3, knuckle: simd_float3, palm: simd_float3) -> Float {
+        let fingerLength = max(simd_length(tip - knuckle), 0.001)
+        let tipDistance = simd_length(tip - palm)
+        let normalized = (tipDistance - fingerLength * 0.2) / (fingerLength * 1.1)
+        return clamp(1.0 - normalized, min: 0.0, max: 1.0)
+    }
+
+    private func palmCenterWorld(hand: HandAnchor, steamVrFromApple: simd_float4x4) -> simd_float3? {
+        guard hand.isTracked, let skeleton = hand.handSkeleton else {
+            return nil
+        }
+        let middleMetacarpal = skeleton.joint(.middleFingerMetacarpal)
+        let middleKnuckle = skeleton.joint(.middleFingerKnuckle)
+        let middleMetacarpalTransform = steamVrFromApple * hand.originFromAnchorTransform * middleMetacarpal.anchorFromJointTransform
+        let middleKnuckleTransform = steamVrFromApple * hand.originFromAnchorTransform * middleKnuckle.anchorFromJointTransform
+        let middleMetacarpalPosition = middleMetacarpalTransform.columns.3.asFloat3()
+        let middleKnucklePosition = middleKnuckleTransform.columns.3.asFloat3()
+        return (middleMetacarpalPosition + middleKnucklePosition) * 0.5
+    }
+
+    private func clamp(_ value: Float, min: Float, max: Float) -> Float {
+        return Swift.max(min, Swift.min(max, value))
+    }
+
+    private func applyDeadzone(_ value: Float, deadzone: Float) -> Float {
+        if abs(value) < deadzone {
+            return 0.0
+        }
+        let scaled = (abs(value) - deadzone) / (1.0 - deadzone)
+        return (value >= 0.0 ? 1.0 : -1.0) * scaled
+    }
     
     func sendGamepadHaptics(isLeft: Bool, isBoth: Bool, isPsvr: Bool, haptics: GCDeviceHaptics) {
         if (isLeft || isBoth) {
@@ -2185,6 +2302,8 @@ class WorldTracker {
         let transformLastRefetched = self.worldTrackingSteamVRTransform.inverse * appleOriginFromAnchorLastRefetched
         let leftTransform = transform * viewTransforms[0]
         let rightTransform = transform * viewTransforms[1]
+
+        _ = updateTorsoYaw(headForwardWorld: -transform.columns.2.asFloat3(), now: CACurrentMediaTime())
         
         let leftOrientation = simd_quaternion(leftTransform)
         let leftPosition = leftTransform.columns.3
@@ -2515,6 +2634,68 @@ class WorldTracker {
             handPoses = handTracking.latestAnchors
 #endif
         }
+
+        let gestureNow = CACurrentMediaTime()
+        let steamVrFromApple = self.worldTrackingSteamVRTransform.inverse
+        let anchorHand = clutchRecognizer.config.allowedHand == .left ? handPoses.leftHand : handPoses.rightHand
+        let anchorPosition = anchorHand.flatMap { palmCenterWorld(hand: $0, steamVrFromApple: steamVrFromApple) }
+        var overlayState = ModeSwitchOverlayState(isActive: false,
+                                                  selectedSlot: nil,
+                                                  currentMode: modeManager.currentMode,
+                                                  slotMapping: modeManager.slotMapping(),
+                                                  showDebugQuad: true,
+                                                  safeZone: clutchRecognizer.config.safeZone,
+                                                  didCommit: false,
+                                                  didCancel: false,
+                                                  showIdleLabel: true,
+                                                  debugAnchorWorldPosition: anchorPosition ?? simd_float3(),
+                                                  debugAnchorValid: anchorPosition != nil)
+        let allowedHand = clutchRecognizer.config.allowedHand
+        let clutchUpdate = allowedHand == .left
+            ? clutchRecognizer.update(hand: handPoses.leftHand, headTransform: transform, torsoYaw: torsoYaw, steamVrFromApple: steamVrFromApple, now: gestureNow)
+            : clutchRecognizer.update(hand: handPoses.rightHand, headTransform: transform, torsoYaw: torsoYaw, steamVrFromApple: steamVrFromApple, now: gestureNow)
+        if let update = clutchUpdate {
+            if debugModeSwitchLogging {
+                if update.isActive && !lastClutchActive {
+                    print("[ModeSwitch] clutch start hand=\(update.hand)")
+                }
+                if update.selectedSlot != lastClutchSlot {
+                    if let slot = update.selectedSlot {
+                        print("[ModeSwitch] slot=\(slot)")
+                    } else if lastClutchSlot != nil {
+                        print("[ModeSwitch] slot cleared")
+                    }
+                }
+                if update.didCancel {
+                    print("[ModeSwitch] cancel")
+                }
+                if let committed = update.committedSlot {
+                    print("[ModeSwitch] commit \(committed) -> \(modeManager.modeForSlot(committed))")
+                }
+                lastClutchActive = update.isActive
+                lastClutchSlot = update.selectedSlot
+            }
+            if update.didPanicToggle {
+                modeManager.toggleSafeFull()
+                if debugModeSwitchLogging {
+                    print("[ModeSwitch] panic toggle -> \(modeManager.currentMode)")
+                }
+            } else if let committed = update.committedSlot {
+                modeManager.setMode(modeManager.modeForSlot(committed))
+            }
+            overlayState = ModeSwitchOverlayState(isActive: update.isActive,
+                                                  selectedSlot: update.selectedSlot,
+                                                  currentMode: modeManager.currentMode,
+                                                  slotMapping: modeManager.slotMapping(),
+                                                  showDebugQuad: true,
+                                                  safeZone: clutchRecognizer.config.safeZone,
+                                                  didCommit: update.committedSlot != nil,
+                                                  didCancel: update.didCancel,
+                                                  showIdleLabel: true,
+                                                  debugAnchorWorldPosition: anchorPosition ?? simd_float3(),
+                                                  debugAnchorValid: anchorPosition != nil)
+        }
+        modeSwitchOverlayState = overlayState
         
         // Skeleton disabling for SteamVR input 2.0
         leftSkeletonDisableHysteresis -= 0.01
@@ -2618,8 +2799,10 @@ class WorldTracker {
             trackingMotions.append(controllerRightMotion!)
         }
         
-        // For hand gestures, we have to avoid sending controller motions
-        if handGesturesEnabled {
+        let shouldEmulateHands = (controllerLeftMotion == nil && controllerRightMotion == nil)
+
+        // For hand gestures, avoid sending controller motions unless we're emulating hands as controllers.
+        if handGesturesEnabled && !shouldEmulateHands {
             if skeletonLeft != nil {
                 trackingMotions.removeAll(where: {$0.device_id == WorldTracker.deviceIdLeftHand })
             }
@@ -2634,6 +2817,76 @@ class WorldTracker {
         
         func scalarVal(_ val: Float) -> AlvrButtonValue {
             return AlvrButtonValue(tag: ALVR_BUTTON_VALUE_SCALAR, AlvrButtonValue.__Unnamed_union___Anonymous_field1(AlvrButtonValue.__Unnamed_union___Anonymous_field1.__Unnamed_struct___Anonymous_field1(scalar: val)))
+        }
+
+        func sendNeutralHandInputs(isLeft: Bool) {
+            alvr_send_button(isLeft ? WorldTracker.leftTriggerClick : WorldTracker.rightTriggerClick, boolVal(false))
+            alvr_send_button(isLeft ? WorldTracker.leftTriggerValue : WorldTracker.rightTriggerValue, scalarVal(0.0))
+            alvr_send_button(isLeft ? WorldTracker.leftTriggerTouched : WorldTracker.rightTriggerTouched, boolVal(false))
+            alvr_send_button(isLeft ? WorldTracker.leftSqueezeClick : WorldTracker.rightSqueezeClick, boolVal(false))
+            alvr_send_button(isLeft ? WorldTracker.leftSqueezeValue : WorldTracker.rightSqueezeValue, scalarVal(0.0))
+            alvr_send_button(isLeft ? WorldTracker.leftSqueezeForce : WorldTracker.rightSqueezeForce, scalarVal(0.0))
+            alvr_send_button(isLeft ? WorldTracker.leftSqueezeTouched : WorldTracker.rightSqueezeTouched, boolVal(false))
+            alvr_send_button(isLeft ? WorldTracker.leftThumbstickX : WorldTracker.rightThumbstickX, scalarVal(0.0))
+            alvr_send_button(isLeft ? WorldTracker.leftThumbstickY : WorldTracker.rightThumbstickY, scalarVal(0.0))
+            alvr_send_button(isLeft ? WorldTracker.leftThumbstickClick : WorldTracker.rightThumbstickClick, boolVal(false))
+            alvr_send_button(isLeft ? WorldTracker.leftThumbstickTouched : WorldTracker.rightThumbstickTouched, boolVal(false))
+        }
+
+        func sendHandEmulationInputs(hand: HandAnchor.Chirality, input: HandInputValues) {
+            let isLeft = hand == .left
+            var triggerValue = input.triggerValue
+            var gripValue = input.gripValue
+            var thumbX = input.thumbstickX
+            var thumbY = input.thumbstickY
+
+            let mode = modeManager.perHandMode(for: hand)
+            switch mode {
+            case .handsSafe:
+                gripValue = 0.0
+                thumbX = 0.0
+                thumbY = 0.0
+            case .fullController:
+                break
+            case .lockedHold:
+                let latched = modeManager.updateGripLatch(for: hand, gripValue: gripValue, latchThreshold: 0.6, releaseThreshold: 0.2)
+                gripValue = latched ? 1.0 : 0.0
+                thumbX = 0.0
+                thumbY = 0.0
+            case .mixedOffhandUi:
+                if hand != modeManager.dominantHand {
+                    gripValue = 0.0
+                    thumbX = 0.0
+                    thumbY = 0.0
+                }
+            }
+
+            let triggerClick = triggerValue > 0.7
+            let gripClick = gripValue > 0.6
+            alvr_send_button(isLeft ? WorldTracker.leftTriggerClick : WorldTracker.rightTriggerClick, boolVal(triggerClick))
+            alvr_send_button(isLeft ? WorldTracker.leftTriggerValue : WorldTracker.rightTriggerValue, scalarVal(triggerValue))
+            alvr_send_button(isLeft ? WorldTracker.leftTriggerTouched : WorldTracker.rightTriggerTouched, boolVal(triggerValue > 0.1))
+            alvr_send_button(isLeft ? WorldTracker.leftSqueezeClick : WorldTracker.rightSqueezeClick, boolVal(gripClick))
+            alvr_send_button(isLeft ? WorldTracker.leftSqueezeValue : WorldTracker.rightSqueezeValue, scalarVal(gripValue))
+            alvr_send_button(isLeft ? WorldTracker.leftSqueezeForce : WorldTracker.rightSqueezeForce, scalarVal(gripValue))
+            alvr_send_button(isLeft ? WorldTracker.leftSqueezeTouched : WorldTracker.rightSqueezeTouched, boolVal(gripValue > 0.1))
+            alvr_send_button(isLeft ? WorldTracker.leftThumbstickX : WorldTracker.rightThumbstickX, scalarVal(thumbX))
+            alvr_send_button(isLeft ? WorldTracker.leftThumbstickY : WorldTracker.rightThumbstickY, scalarVal(thumbY))
+            alvr_send_button(isLeft ? WorldTracker.leftThumbstickClick : WorldTracker.rightThumbstickClick, boolVal(false))
+            alvr_send_button(isLeft ? WorldTracker.leftThumbstickTouched : WorldTracker.rightThumbstickTouched, boolVal(abs(thumbX) > 0.1 || abs(thumbY) > 0.1))
+        }
+
+        if shouldEmulateHands {
+            if let leftHand = handPoses.leftHand, let leftInput = handInputValues(hand: leftHand, headTransform: transform, steamVrFromApple: steamVrFromApple) {
+                sendHandEmulationInputs(hand: .left, input: leftInput)
+            } else {
+                sendNeutralHandInputs(isLeft: true)
+            }
+            if let rightHand = handPoses.rightHand, let rightInput = handInputValues(hand: rightHand, headTransform: transform, steamVrFromApple: steamVrFromApple) {
+                sendHandEmulationInputs(hand: .right, input: rightInput)
+            } else {
+                sendNeutralHandInputs(isLeft: false)
+            }
         }
         
         // MARK: - Emulated pinch interactions overwrite emulated controller motions

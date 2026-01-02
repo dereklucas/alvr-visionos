@@ -5,7 +5,6 @@
 #if PERF_HUD
 import SwiftUI
 import Metal
-import MetalKit
 import os
 
 private struct GraphView: View {
@@ -159,7 +158,7 @@ private struct PerformanceOverlayContent: View {
         }
         .padding(8)
         .frame(width: 240)
-        .background(.black.opacity(0.6))
+        .background(Color.black)
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
@@ -207,7 +206,6 @@ struct PerformanceOverlaySnapshotView: View {
 
 final class PerformanceHudRenderer {
     private let device: MTLDevice
-    private let textureLoader: MTKTextureLoader
     private let queue = DispatchQueue(label: "PerfHUD.Render")
     private let lock = OSAllocatedUnfairLock()
     private var texture: MTLTexture?
@@ -217,7 +215,57 @@ final class PerformanceHudRenderer {
 
     init(device: MTLDevice) {
         self.device = device
-        self.textureLoader = MTKTextureLoader(device: device)
+    }
+
+    private func makeTexture(cgImage: CGImage) -> MTLTexture? {
+        let width = cgImage.width
+        let height = cgImage.height
+        let bytesPerPixel = 4
+        let bytesPerRow = width * bytesPerPixel
+        let dataSize = bytesPerRow * height
+
+        var data = Data(count: dataSize)
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
+        let created = data.withUnsafeMutableBytes { rawBuffer -> Bool in
+            guard let baseAddress = rawBuffer.baseAddress else {
+                return false
+            }
+            guard let context = CGContext(data: baseAddress,
+                                          width: width,
+                                          height: height,
+                                          bitsPerComponent: 8,
+                                          bytesPerRow: bytesPerRow,
+                                          space: colorSpace,
+                                          bitmapInfo: bitmapInfo.rawValue) else {
+                return false
+            }
+            context.clear(CGRect(x: 0, y: 0, width: width, height: height))
+            context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard created else {
+            return nil
+        }
+
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
+                                                                   width: width,
+                                                                   height: height,
+                                                                   mipmapped: false)
+        descriptor.usage = [.shaderRead]
+        descriptor.storageMode = .shared
+        guard let texture = device.makeTexture(descriptor: descriptor) else {
+            return nil
+        }
+        data.withUnsafeBytes { rawBuffer in
+            if let baseAddress = rawBuffer.baseAddress {
+                texture.replace(region: MTLRegionMake2D(0, 0, width, height),
+                                mipmapLevel: 0,
+                                withBytes: baseAddress,
+                                bytesPerRow: bytesPerRow)
+            }
+        }
+        return texture
     }
 
     func updateIfNeeded() -> MTLTexture? {
@@ -245,11 +293,7 @@ final class PerformanceHudRenderer {
                         self.lock.withLock { self.isUpdating = false }
                         return
                     }
-                    let options: [MTKTextureLoader.Option: Any] = [
-                        .SRGB: false,
-                        .origin: MTKTextureLoader.Origin.topLeft
-                    ]
-                    let newTexture = try? self.textureLoader.newTexture(cgImage: cgImage, options: options)
+                    let newTexture = self.makeTexture(cgImage: cgImage)
                     self.lock.withLock {
                         self.texture = newTexture
                         self.isUpdating = false
