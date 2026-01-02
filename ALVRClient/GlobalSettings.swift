@@ -30,6 +30,7 @@ struct GlobalSettings: Codable {
     var showFaceTrackingDebug = false
     var lastUsedAppVersion = "never launched"
     var chaperoneDistanceCm: Int = 0
+    var showPerformanceHud: Bool = false
     
     init() {}
     
@@ -58,6 +59,7 @@ struct GlobalSettings: Codable {
         self.showFaceTrackingDebug = try container.decodeIfPresent(Bool.self, forKey: .showFaceTrackingDebug) ?? self.showFaceTrackingDebug
         self.lastUsedAppVersion = try container.decodeIfPresent(String.self, forKey: .lastUsedAppVersion) ?? self.lastUsedAppVersion
         self.chaperoneDistanceCm = try container.decodeIfPresent(Int.self, forKey: .chaperoneDistanceCm) ?? self.chaperoneDistanceCm
+        self.showPerformanceHud = try container.decodeIfPresent(Bool.self, forKey: .showPerformanceHud) ?? self.showPerformanceHud
     }
 }
 

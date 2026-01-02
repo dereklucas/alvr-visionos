@@ -311,6 +311,16 @@ struct Entry: View {
                                .foregroundColor(.secondary)
                         }
                     }
+
+                    Toggle(isOn: $gStore.settings.showPerformanceHud) {
+                        Text("Performance HUD")
+                        Text("Shows a performance panel anchored to your left forearm.")
+                            .font(.system(size: 10))
+                    }
+                    .toggleStyle(.switch)
+                    .onChange(of: gStore.settings.showPerformanceHud) {
+                        saveAction()
+                    }
                 }
                 .frame(minWidth: 450)
                 .padding()

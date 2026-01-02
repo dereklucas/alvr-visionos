@@ -2,7 +2,6 @@
 //  PerformanceOverlayView.swift
 //
 
-#if PERF_HUD
 import SwiftUI
 import Metal
 import os
@@ -304,5 +303,3 @@ final class PerformanceHudRenderer {
         return lock.withLock { texture }
     }
 }
-
-#endif

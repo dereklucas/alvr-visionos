@@ -440,9 +440,9 @@ class EventHandler: ObservableObject {
         }
         
         let timestamp = frameData.timestamp_ns
-#if PERF_HUD
-        PerformanceTracker.shared.recordReceive(timestampNs: timestamp)
-#endif
+        if ALVRClientApp.gStore.settings.showPerformanceHud {
+            PerformanceTracker.shared.recordReceive(timestampNs: timestamp)
+        }
         let nal = UnsafeMutableBufferPointer<UInt8>(start: UnsafeMutablePointer(mutating: frameData.buffer_ptr), count: Int(frameData.buffer_size))
         
         objc_sync_enter(self.frameQueueLock)
@@ -521,9 +521,9 @@ class EventHandler: ObservableObject {
                     //print("Frame not decoded")
                     return
                 }
-#if PERF_HUD
-                PerformanceTracker.shared.recordDecodeEnd(timestampNs: timestamp)
-#endif
+                if ALVRClientApp.gStore.settings.showPerformanceHud {
+                    PerformanceTracker.shared.recordDecodeEnd(timestampNs: timestamp)
+                }
                 //print("Frame decoded")
                 
                 if (CACurrentMediaTime() - startedDecodeTime > Double(50*MSEC_PER_SEC)) {

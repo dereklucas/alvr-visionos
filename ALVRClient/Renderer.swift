@@ -114,9 +114,7 @@ class Renderer {
     var hudPipelineState: MTLRenderPipelineState!
     var hudQuadBuffer: MTLBuffer!
     var depthStateAlwaysNoWrite: MTLDepthStencilState!
-#if PERF_HUD
     var performanceHudRenderer: PerformanceHudRenderer?
-#endif
 
     func renderModeSwitchOverlay(commandBuffer: MTLCommandBuffer, renderTargetColor: MTLTexture, renderTargetDepth: MTLTexture, viewports: [MTLViewport], rasterizationRateMap: MTLRasterizationRateMap?, simdDeviceAnchor: simd_float4x4) {
         guard let overlayRenderer = modeSwitchOverlayRenderer else {
@@ -405,9 +403,6 @@ class Renderer {
         )
 
         modeSwitchOverlayRenderer = ModeSwitchOverlayRenderer(device: device)
-#if PERF_HUD
-        performanceHudRenderer = PerformanceHudRenderer(device: device)
-#endif
         
         rebuildRenderPipelines()
 
@@ -992,10 +987,10 @@ class Renderer {
         let vsyncTime = LayerRenderer.Clock.Instant.epoch.duration(to: mainDrawable.frameTiming.presentationTime).timeInterval
         let vsyncTimeNs = UInt64(vsyncTime * Double(NSEC_PER_SEC))
         let framePreviouslyPredictedPose = queuedFrame != nil ? WorldTracker.shared.convertSteamVRViewPose(queuedFrame!.viewParams) : nil
-#if PERF_HUD
-        PerformanceTracker.shared.recordFramePresentation(presentationTime: mainDrawable.frameTiming.presentationTime, timestampNs: queuedFrame?.timestamp)
-        PerformanceTracker.shared.logIfNeeded(presentationTime: mainDrawable.frameTiming.presentationTime)
-#endif
+        if ALVRClientApp.gStore.settings.showPerformanceHud {
+            PerformanceTracker.shared.recordFramePresentation(presentationTime: mainDrawable.frameTiming.presentationTime, timestampNs: queuedFrame?.timestamp)
+            PerformanceTracker.shared.logIfNeeded(presentationTime: mainDrawable.frameTiming.presentationTime)
+        }
         
         // Do NOT move this, just in case, because DeviceAnchor is wonkey and every DeviceAnchor mutates each other.
         if EventHandler.shared.alvrInitialized && EventHandler.shared.lastIpd != -1 {
@@ -1037,12 +1032,10 @@ class Renderer {
                 alvr_report_submit(queuedFrame!.timestamp, vsyncTimeNs &- currentTimeNs)
                 EventHandler.shared.lastSubmittedTimestamp = queuedFrame!.timestamp
             }
-#if PERF_HUD
-            if let ts = queuedFrame?.timestamp {
+            if ALVRClientApp.gStore.settings.showPerformanceHud, let ts = queuedFrame?.timestamp {
                 PerformanceTracker.shared.recordSubmit(timestampNs: ts)
                 PerformanceTracker.shared.recordGpu(timestampNs: ts, gpuStartTime: commandBuffer.gpuStartTime, gpuEndTime: commandBuffer.gpuEndTime)
             }
-#endif
         }
 
         // List of reasons to not display a frame
@@ -1094,11 +1087,12 @@ class Renderer {
         }
 
         
-#if PERF_HUD
-        if renderingStreaming && frameIsSuitableForDisplaying && queuedFrame != nil {
-            PerformanceTracker.shared.recordCompositorStart(timestampNs: queuedFrame!.timestamp)
+        if ALVRClientApp.gStore.settings.showPerformanceHud,
+           renderingStreaming,
+           frameIsSuitableForDisplaying,
+           let queuedFrame {
+            PerformanceTracker.shared.recordCompositorStart(timestampNs: queuedFrame.timestamp)
         }
-#endif
         for drawable in drawables {
             drawable.deviceAnchor = deviceAnchor
             
@@ -1645,10 +1639,12 @@ class Renderer {
         renderEncoder.endEncoding()
     }
 
-#if PERF_HUD
     func renderPerformanceHud(commandBuffer: MTLCommandBuffer, renderTargetColor: MTLTexture, renderTargetDepth: MTLTexture, viewports: [MTLViewport], rasterizationRateMap: MTLRasterizationRateMap?, simdDeviceAnchor: simd_float4x4) {
-        let hudTexture = performanceHudRenderer?.updateIfNeeded()
-        let useDebugQuad = hudTexture == nil
+        guard ALVRClientApp.gStore.settings.showPerformanceHud else { return }
+        if performanceHudRenderer == nil {
+            performanceHudRenderer = PerformanceHudRenderer(device: device)
+        }
+        guard let hudTexture = performanceHudRenderer?.updateIfNeeded() else { return }
         selectNextPlaneUniformBuffer()
         let worldFromSteamVR = WorldTracker.shared.worldTrackingSteamVRTransform
         let handPose = WorldTracker.shared.lastLeftHandPose
@@ -1681,21 +1677,6 @@ class Renderer {
         panelRightEdge = simd_normalize(palmTwist.act(panelRightEdge))
         let forearmDir = panelTopEdge
 
-#if DEBUG_ALVR_TRACKING
-        WorldTracker.shared.lockDebuggables()
-        let handAxisMat = simd_float4x4(simd_float4(thumbAxis, 0.0),
-                                        simd_float4(palmAxis, 0.0),
-                                        simd_float4(elbowAxis, 0.0),
-                                        simd_float4(handPosition, 1.0))
-        WorldTracker.shared.addDebuggablePose(handAxisMat, 0.06)
-        let panelAxisMat = simd_float4x4(simd_float4(panelRightEdge, 0.0),
-                                         simd_float4(panelTopEdge, 0.0),
-                                         simd_float4(panelFront, 0.0),
-                                         simd_float4(handPosition, 1.0))
-        WorldTracker.shared.addDebuggablePose(panelAxisMat, 0.05)
-        WorldTracker.shared.unlockDebuggables()
-#endif
-
         // Orientation uses panelRightEdge (X), panelTopEdge (Y), panelFront (Z).
         let orientation = simd_float4x4(simd_float4(panelRightEdge, 0.0),
                                         simd_float4(panelTopEdge, 0.0),
@@ -1712,12 +1693,7 @@ class Renderer {
         let position = handPosition + offset
         let translation = position.asFloat4x4()
         let sizeY: Float = 0.07
-        let aspect: Float
-        if let hudTexture, hudTexture.height > 0 {
-            aspect = Float(hudTexture.width) / Float(hudTexture.height)
-        } else {
-            aspect = 240.0 / 250.0
-        }
+        let aspect = Float(hudTexture.width) / Float(hudTexture.height)
         let sizeX: Float = sizeY * aspect
         let scale = simd_float4x4(simd_float4(sizeX, 0.0, 0.0, 0.0),
                                   simd_float4(0.0, sizeY, 0.0, 0.0),
@@ -1726,7 +1702,7 @@ class Renderer {
         let transform = translation * orientation * scale
 
         self.planeUniforms[0].planeTransform = transform
-        self.planeUniforms[0].planeColor = useDebugQuad ? simd_float4(1.0, 0.0, 1.0, 0.9) : simd_float4(1.0, 1.0, 1.0, 1.0)
+        self.planeUniforms[0].planeColor = simd_float4(1.0, 1.0, 1.0, 1.0)
         self.planeUniforms[0].planeDoProximity = 0.0
 
         let renderPassDescriptor = MTLRenderPassDescriptor()
@@ -1759,20 +1735,17 @@ class Renderer {
             renderEncoder.setVertexAmplificationCount(viewports.count, viewMappings: &viewMappings)
         }
 
-        renderEncoder.setRenderPipelineState(useDebugQuad ? pipelineState : hudPipelineState)
+        renderEncoder.setRenderPipelineState(hudPipelineState)
         renderEncoder.setDepthStencilState(depthStateAlwaysNoWrite)
 #if !targetEnvironment(simulator)
         renderEncoder.setDepthClipMode(.clamp)
 #endif
         renderEncoder.setVertexBuffer(hudQuadBuffer, offset: 0, index: VertexAttribute.position.rawValue)
         renderEncoder.setVertexBuffer(hudQuadBuffer, offset: (3 * 4) * 4, index: VertexAttribute.texcoord.rawValue)
-        if let hudTexture {
-            renderEncoder.setFragmentTexture(hudTexture, index: TextureIndex.color.rawValue)
-        }
+        renderEncoder.setFragmentTexture(hudTexture, index: TextureIndex.color.rawValue)
         renderEncoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         renderEncoder.endEncoding()
     }
-#endif
     
     // Sets up rendering a video frame, including uniforms
     func beginRenderStreamingFrame(_ whichIdx: Int, commandBuffer: MTLCommandBuffer, renderTargetColor: MTLTexture, renderTargetDepth: MTLTexture, viewports: [MTLViewport], viewTransforms: [simd_float4x4], sentViewTangents: [simd_float4], realViewTangents: [simd_float4], nearZ: Double, farZ: Double, rasterizationRateMap: MTLRasterizationRateMap?, queuedFrame: QueuedFrame?, framePose: simd_float4x4, simdDeviceAnchor: simd_float4x4, drawable: LayerRenderer.Drawable?) -> (any MTLRenderCommandEncoder)? {
@@ -1933,11 +1906,9 @@ class Renderer {
         if !isRealityKit {
             renderStreamingFrameDepth(commandBuffer: commandBuffer, renderTargetColor: renderTargetColor, renderTargetDepth: renderTargetDepth, viewports: viewports, viewTransforms: viewTransforms, sentViewTangents: sentViewTangents, realViewTangents: realViewTangents, nearZ: nearZ, farZ: farZ, rasterizationRateMap: rasterizationRateMap, queuedFrame: queuedFrame)
         }
-#if PERF_HUD
-        if !isRealityKit {
+        if !isRealityKit && ALVRClientApp.gStore.settings.showPerformanceHud {
             renderPerformanceHud(commandBuffer: commandBuffer, renderTargetColor: renderTargetColor, renderTargetDepth: renderTargetDepth, viewports: viewports, rasterizationRateMap: rasterizationRateMap, simdDeviceAnchor: simdDeviceAnchor)
         }
-#endif
         renderModeSwitchOverlay(commandBuffer: commandBuffer, renderTargetColor: renderTargetColor, renderTargetDepth: renderTargetDepth, viewports: viewports, rasterizationRateMap: rasterizationRateMap, simdDeviceAnchor: simdDeviceAnchor)
     }
 }

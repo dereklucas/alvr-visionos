@@ -2,7 +2,6 @@
 //  PerformanceTracker.swift
 //
 
-#if PERF_HUD
 import CompositorServices
 import Dispatch
 import Foundation
@@ -253,4 +252,3 @@ final class PerformanceTracker {
         return String(format: "%.3fms", value)
     }
 }
-#endif
