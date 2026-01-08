@@ -11,6 +11,7 @@ import AVKit
 
 struct RealityKitClientView: View {
     var texture: MaterialParameters.Texture?
+    var isPreview: Bool = false
     
     static func handleSpatialEvent(_ value: EntityTargetValue<SpatialEventCollection>?, _ event: SpatialEventCollection.Event) {
         if value != nil {
@@ -177,13 +178,17 @@ struct RealityKitClientView: View {
     
     var body: some View {
         RealityView { content, attachments in
-            await RealityKitClientSystem.setup(content, attachments)
-            await RealityKitEyeTrackingSystem.setup(content)
+            await RealityKitClientSystem.setup(content, attachments, isPreview: isPreview)
+            if !isPreview {
+                await RealityKitEyeTrackingSystem.setup(content)
+            }
             
             MagicRealityKitClientSystemComponent.registerComponent()
-            MagicRealityKitEyeTrackingSystemComponent.registerComponent()
             RealityKitClientSystem.registerSystem()
-            RealityKitEyeTrackingSystem.registerSystem()
+            if !isPreview {
+                MagicRealityKitEyeTrackingSystemComponent.registerComponent()
+                RealityKitEyeTrackingSystem.registerSystem()
+            }
             
             /*if let cam = attachments.entity(for: "camera") {
                 cam.setParent(nil)

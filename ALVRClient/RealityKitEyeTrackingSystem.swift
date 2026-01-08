@@ -17,9 +17,11 @@
 import SwiftUI
 import RealityKit
 import QuartzCore
+import OSLog
 
 let eyeTrackWidth = Int(Float(renderWidth) * 2.5)
 let eyeTrackHeight = Int(Float(renderHeight) * 2.5)
+private let eyeTrackingLogger = Logger(subsystem: "ALVRClient", category: "EyeTracking")
 
 class NotificationShiftRegisterVar {
     var raw: UInt32 = 0
@@ -128,25 +130,36 @@ class RealityKitEyeTrackingSystem : System {
     }
     
     static func setup(_ content: RealityViewContent) async {
-        var hoverEffectTrackerMat: ShaderGraphMaterial? = nil
-        
-        if #available(visionOS 2.0, *) {
-            hoverEffectTrackerMat = try! await ShaderGraphMaterial(
-                named: "/Root/HoverEdgeTracker",
-                from: "EyeTrackingMats.usda"
-            )
-        }
-        else {
-            hoverEffectTrackerMat = try! await ShaderGraphMaterial(
+        let hoverEffectTrackerMat: ShaderGraphMaterial
+        let leftEyeOnlyMat: ShaderGraphMaterial
+
+        do {
+            if #available(visionOS 2.0, *) {
+                hoverEffectTrackerMat = try await ShaderGraphMaterial(
+                    named: "/Root/HoverEdgeTracker",
+                    from: "EyeTrackingMats.usda"
+                )
+            }
+            else {
+                hoverEffectTrackerMat = try await ShaderGraphMaterial(
+                    named: "/Root/LeftEyeOnly",
+                    from: "EyeTrackingMats.usda"
+                )
+            }
+
+            leftEyeOnlyMat = try await ShaderGraphMaterial(
                 named: "/Root/LeftEyeOnly",
                 from: "EyeTrackingMats.usda"
             )
         }
-        
-        let leftEyeOnlyMat = try! await ShaderGraphMaterial(
-            named: "/Root/LeftEyeOnly",
-            from: "EyeTrackingMats.usda"
-        )
+        catch is CancellationError {
+            eyeTrackingLogger.debug("Eye tracking setup canceled.")
+            return
+        }
+        catch {
+            eyeTrackingLogger.error("Eye tracking setup failed: \(error.localizedDescription)")
+            return
+        }
             
         await MainActor.run { [hoverEffectTrackerMat] in
             let planeMesh = MeshResource.generatePlane(width: 1.0, depth: 1.0)
@@ -161,7 +174,7 @@ class RealityKitEyeTrackingSystem : System {
             eyeYPlane.scale = simd_float3(0.0, 0.0, 0.0)
             eyeYPlane.components.set(MagicRealityKitEyeTrackingSystemComponent())
 
-            let eye2Plane = ModelEntity(mesh: planeMesh, materials: [hoverEffectTrackerMat!])
+            let eye2Plane = ModelEntity(mesh: planeMesh, materials: [hoverEffectTrackerMat])
             eye2Plane.name = "eye_2_plane"
             eye2Plane.scale = simd_float3(0.0, 0.0, 0.0)
             eye2Plane.components.set(MagicRealityKitEyeTrackingSystemComponent())

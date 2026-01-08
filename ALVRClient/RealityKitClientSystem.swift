@@ -74,6 +74,8 @@ struct VrrPlaneVertex {
     var uv: simd_float2 = .zero
 }
 
+struct RealityKitPreviewMarkerComponent : Component {}
+
 class VisionProVsyncPrediction: NSObject, ObservableObject {
     var nextFrameTime: TimeInterval = 0.0
 
@@ -142,7 +144,7 @@ class RealityKitClientSystem : System {
         }
     }
     
-    static func setup(_ content: RealityViewContent, _ attachments: RealityViewAttachments? = nil) async {
+    static func setup(_ content: RealityViewContent, _ attachments: RealityViewAttachments? = nil, isPreview: Bool = false) async {
         
         await MainActor.run {
             let materialBackdrop = UnlitMaterial(color: .black)
@@ -234,6 +236,13 @@ class RealityKitClientSystem : System {
             content.add(videoPlaneC_R)
             content.add(checkFloorLevelingPlane)
             content.add(anchor)
+
+            if isPreview {
+                let previewMarker = Entity()
+                previewMarker.name = "preview_marker"
+                previewMarker.components.set(RealityKitPreviewMarkerComponent())
+                content.add(previewMarker)
+            }
             
             if let cam = attachments?.entity(for: "persona_camera") {
                 //cam.setParent(nil)
@@ -269,10 +278,19 @@ class RealityKitClientSystem : System {
         // on names
         
         var hasMagic = false
+        var isPreviewScene = false
         let query = EntityQuery(where: .has(MagicRealityKitClientSystemComponent.self))
         for _ in context.entities(matching: query, updatingSystemWhen: .rendering) {
             hasMagic = true
             break
+        }
+
+        if hasMagic {
+            let previewQuery = EntityQuery(where: .has(RealityKitPreviewMarkerComponent.self))
+            for _ in context.entities(matching: previewQuery, updatingSystemWhen: .rendering) {
+                isPreviewScene = true
+                break
+            }
         }
         
         if !hasMagic {
@@ -281,7 +299,9 @@ class RealityKitClientSystem : System {
         }
         
         if s == nil {
-            s = RealityKitClientSystemCorrectlyAssociated(scene: context.scene)
+            let system = RealityKitClientSystemCorrectlyAssociated(scene: context.scene)
+            system.isPreview = isPreviewScene
+            s = system
         }
     }
 }
@@ -416,6 +436,7 @@ class RealityKitClientSystemCorrectlyAssociated : System {
     var passthroughPipelineState: MTLRenderPipelineState? = nil
     var passthroughPipelineStateHDR: MTLRenderPipelineState? = nil
     var meshHasVrr = false
+    var isPreview = false
     
     public let device: MTLDevice
     let commandQueue: MTLCommandQueue
@@ -1293,9 +1314,10 @@ class RealityKitClientSystemCorrectlyAssociated : System {
         var vsyncTime = frame.vsyncTime
         let vrrBuffer = frame.vrrBuffer
         
+        let panelDepth: Float = isPreview ? 2.2 : rk_panel_depth
         // HACK: keep the depths separate to avoid z fighting
-        let rk_panel_depth_L = rk_panel_depth
-        let rk_panel_depth_R = rk_panel_depth - 10.0
+        let rk_panel_depth_L = panelDepth
+        let rk_panel_depth_R = panelDepth - 10.0
         
         // TL;DR  each eye has asymmetric render tangents, but we can't scale each half individually so we
         // have to do some math to move the center of the plane where it should be.
@@ -1390,7 +1412,7 @@ class RealityKitClientSystemCorrectlyAssociated : System {
         }
         else {
             // Place giant plane 1m behind the video feed
-            let backdrop_depth = (rk_panel_depth * 2.0)
+        let backdrop_depth = (panelDepth * 2.0)
             backdrop.position = simd_float3(0.0, 0.0, -backdrop_depth)
             backdrop.orientation = simd_quatf(angle: 1.5708, axis: simd_float3(1,0,0))
             backdrop.scale = simd_float3(backdrop_depth * 4.0, backdrop_depth * 4.0, backdrop_depth * 4.0) // TODO: view tangents over 4.0? idk

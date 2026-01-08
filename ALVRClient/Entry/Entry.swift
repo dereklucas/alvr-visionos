@@ -3,6 +3,7 @@ Abstract:
 The Entry content for a volume.
 */
 
+import OSLog
 import RealityKit
 import SwiftUI
 import UIKit
@@ -24,8 +25,11 @@ struct Entry: View {
         formatter.numberStyle = .decimal
         return formatter
     }()
+
+    private let logoLogger = Logger(subsystem: "alvr.client", category: "Entry")
     
     @State private var chromaRangeMaximum: Float = 1.0
+    @State private var portalGlowOn = false
     func applyRangeSettings() {
         if gStore.settings.chromaKeyDistRangeMax < 0.001 {
             gStore.settings.chromaKeyDistRangeMax = 0.001
@@ -51,8 +55,32 @@ struct Entry: View {
         VideoHandler.applyRefreshRate(videoFormat: EventHandler.shared.videoFormat)
     }
 
-    private func connectionInfoView() -> some View {
-        GroupBox("Connection") {
+    private var connectionStatusText: String {
+        if eventHandler.hostname != "" && eventHandler.IP != "" {
+            return eventHandler.hostAlvrVersion != "" ? "Connected" : "Searching"
+        }
+        return "Searching"
+    }
+
+    private var connectionStatusColor: Color {
+        connectionStatusText == "Connected" ? .green : .secondary
+    }
+
+    private func sessionInfoView() -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Session")
+                    .font(.system(size: 14, weight: .semibold))
+                Spacer()
+                Text(connectionStatusText)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(connectionStatusColor)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background(.thinMaterial)
+                    .clipShape(Capsule())
+            }
+
             if eventHandler.hostname != "" && eventHandler.IP != "" {
                 let columns = [
                     GridItem(.fixed(140), alignment: .trailing),
@@ -60,57 +88,98 @@ struct Entry: View {
                 ]
 
                 LazyVGrid(columns: columns, spacing: 8) {
-                    Text("Host")
+                    Text("Streamer")
                         .foregroundStyle(.secondary)
                     Text(eventHandler.hostname)
+
                     Text("IP Address")
                         .foregroundStyle(.secondary)
                     Text(eventHandler.IP)
+                        .font(.system(.body, design: .monospaced))
+
                     Text("Protocol")
                         .foregroundStyle(.secondary)
                     Text(eventHandler.getMdnsProtocolId())
-                    Text("Streamer")
+                        .font(.system(.body, design: .monospaced))
+
+                    Text("Streamer Version")
                         .foregroundStyle(.secondary)
                     if eventHandler.hostAlvrVersion != "" {
                         Text(eventHandler.hostAlvrVersion)
                     }
                     else {
-                        Text("Disconnected")
+                        Text("Not connected")
                             .foregroundStyle(.secondary)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .center)
             }
             else {
-                Text("Searching for a streamer.")
+                Text("No streamer found.")
+                    .font(.system(size: 14, weight: .semibold))
+                Text("Make sure ALVR is running on your PC.")
+                    .font(.system(size: 11))
                     .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
             }
+
+            Divider()
+
+            HStack {
+                Text("Client")
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if eventHandler.alvrVersion != "" {
+                    Text(eventHandler.alvrVersion)
+                        .font(.system(.body, design: .monospaced))
+                }
+                else {
+                    Text("Loading")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Text(eventHandler.connectionFlavorText)
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .padding(16)
+        .glassBackgroundEffect(in: RoundedRectangle(cornerRadius: 20))
+        .overlay(
+            RoundedRectangle(cornerRadius: 20)
+                .strokeBorder(.white.opacity(0.12), lineWidth: 1)
+        )
     }
 
     private func logo3DView() -> some View {
         RealityView { content in
-            let orb = ModelEntity(
-                mesh: .generateSphere(radius: 0.06),
-                materials: [SimpleMaterial(color: .white, roughness: 0.1, isMetallic: true)]
-            )
-            let plate = ModelEntity(
-                mesh: .generateBox(size: 0.12),
-                materials: [SimpleMaterial(color: UIColor.systemTeal, roughness: 0.2, isMetallic: true)]
-            )
-            plate.transform = Transform(pitch: 0.1, yaw: 0.6, roll: 0.2)
+            if let logo = try? await Entity(named: "alvr", in: .main) {
+                content.add(logo)
+            }
+            else {
+                logoLogger.warning("Failed to load USDZ asset named 'alvr'.")
+                let orb = ModelEntity(
+                    mesh: .generateSphere(radius: 0.06),
+                    materials: [SimpleMaterial(color: .white, roughness: 0.1, isMetallic: true)]
+                )
+                let plate = ModelEntity(
+                    mesh: .generateBox(size: 0.12),
+                    materials: [SimpleMaterial(color: UIColor.systemTeal, roughness: 0.2, isMetallic: true)]
+                )
+                plate.transform = Transform(pitch: 0.1, yaw: 0.6, roll: 0.2)
 
-            let root = Entity()
-            root.addChild(orb)
-            root.addChild(plate)
-            content.add(root)
+                let root = Entity()
+                root.addChild(orb)
+                root.addChild(plate)
+                content.add(root)
+            }
         }
         .frame(width: 220, height: 220)
         .accessibilityLabel("ALVR 3D logo")
     }
 
     var body: some View {
+        let canShowStreamPreview = eventHandler.streamingActive && Settings.getAlvrSettings() != nil
         VStack(spacing: 16) {
             TabView {
                 VStack(spacing: 16) {
@@ -124,40 +193,78 @@ struct Entry: View {
 
                     GroupBox("Stream Portal") {
                         ZStack {
-                            RoundedRectangle(cornerRadius: 24)
-                                .fill(.thinMaterial)
+                            RoundedRectangle(cornerRadius: 28)
+                                .fill(.ultraThinMaterial)
                                 .overlay(
-                                    RoundedRectangle(cornerRadius: 24)
-                                        .strokeBorder(.white.opacity(0.2), lineWidth: 1)
+                                    RoundedRectangle(cornerRadius: 28)
+                                        .strokeBorder(.white.opacity(0.15), lineWidth: 1)
                                 )
-                            VStack(spacing: 6) {
-                                Text("Portal preview")
-                                    .font(.system(size: 14, weight: .semibold))
-                                Text("Placeholder for live stream entry")
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(.secondary)
+
+                            if canShowStreamPreview {
+                                RealityKitClientView(isPreview: true)
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                    .clipShape(RoundedRectangle(cornerRadius: 24))
+                                    .padding(8)
+                                    .allowsHitTesting(false)
+                            }
+
+                            TimelineView(.animation) { context in
+                                let angle = Angle.degrees(context.date.timeIntervalSinceReferenceDate * 20)
+                                RoundedRectangle(cornerRadius: 24)
+                                    .fill(
+                                        AngularGradient(
+                                            gradient: Gradient(colors: [
+                                                Color.teal.opacity(0.35),
+                                                Color.white.opacity(0.15),
+                                                Color.teal.opacity(0.5),
+                                                Color.white.opacity(0.08),
+                                                Color.teal.opacity(0.35)
+                                            ]),
+                                            center: .center,
+                                            angle: angle
+                                        )
+                                    )
+                                    .blendMode(.screen)
+                                    .padding(10)
+                                    .opacity(canShowStreamPreview ? 0.25 : 1)
+                            }
+
+                            RoundedRectangle(cornerRadius: 22)
+                                .strokeBorder(
+                                    LinearGradient(
+                                        colors: [
+                                            Color.white.opacity(0.3),
+                                            Color.teal.opacity(0.6),
+                                            Color.white.opacity(0.15)
+                                        ],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    ),
+                                    lineWidth: 1.5
+                                )
+                                .padding(14)
+                                .blur(radius: portalGlowOn ? 0.2 : 0.8)
+                                .opacity(portalGlowOn ? 0.9 : 0.6)
+
+                            if !canShowStreamPreview {
+                                VStack(spacing: 8) {
+                                    ProgressView()
+                                    Text(eventHandler.streamingActive ? "Starting stream…" : "Waiting for stream…")
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundStyle(.secondary)
+                                }
                             }
                         }
-                        .frame(height: 160)
-                    }
-
-                    connectionInfoView()
-
-                    VStack(spacing: 6) {
-                        if eventHandler.alvrVersion != "" {
-                            Text(eventHandler.alvrVersion)
-                                .font(.system(size: 18, weight: .bold))
+                        .frame(height: 170)
+                        .onAppear {
+                            withAnimation(.easeInOut(duration: 2.6).repeatForever(autoreverses: true)) {
+                                portalGlowOn = true
+                            }
                         }
-                        else {
-                            Text("Loading settings...")
-                                .font(.system(size: 18, weight: .bold))
-                        }
-
-                        Text(eventHandler.connectionFlavorText)
-                            .font(.system(size: 14))
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .center)
                     }
+                    .glassBackgroundEffect(in: RoundedRectangle(cornerRadius: 22))
+
+                    sessionInfoView()
                 }
                 .frame(minWidth: 450)
                 .padding()
@@ -199,6 +306,13 @@ struct Entry: View {
                                         .font(.system(size: 10))
                                         .frame(maxWidth: .infinity, alignment: .leading)
                                 }
+
+                                Divider()
+
+                                Toggle(isOn: $gStore.settings.dismissWindowOnEnter) {
+                                    Text("Close window on entry")
+                                }
+                                .toggleStyle(.switch)
                             }
                         }
 
@@ -210,7 +324,12 @@ struct Entry: View {
                                 .toggleStyle(.switch)
 
                                 Toggle(isOn: $gStore.settings.disablePersistentSystemOverlays) {
-                                    Text("Disable system overlays (palm)")
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text("Hide system overlays")
+                                        Text("Hides the palm-gesture system UI.")
+                                            .font(.system(size: 10))
+                                            .foregroundStyle(.secondary)
+                                    }
                                 }
                                 .toggleStyle(.switch)
 
@@ -234,7 +353,7 @@ struct Entry: View {
                                 .toggleStyle(.switch)
 
                                 Toggle(isOn: $gStore.settings.enableDoubleTapForHands) {
-                                    Text("Double-tap controllers to switch to hands")
+                                    Text("Clack controllers twice while looking at them to switch to hand tracking")
                                 }
                                 .toggleStyle(.switch)
 
@@ -245,34 +364,29 @@ struct Entry: View {
                             }
                         }
 
-                        GroupBox("Rendering") {
+                        GroupBox("RealityKit Renderer") {
                             VStack(alignment: .leading, spacing: 12) {
+                                Text("Deprecated. May judder or cause discomfort.")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.secondary)
                                 Toggle(isOn: $gStore.settings.experimental40ppd) {
-                                    Text("RealityKit renderer")
-                                    Text("Deprecated. May judder or cause discomfort.")
-                                        .font(.system(size: 10))
+                                    Text("Enabled")
                                 }
                                 .toggleStyle(.switch)
                             }
-                        }
-
-                        if gStore.settings.experimental40ppd {
-                            GroupBox("Chroma Key") {
+                            if gStore.settings.experimental40ppd {
+                                Divider()
                                 VStack(alignment: .leading, spacing: 12) {
                                     Toggle(isOn: $gStore.settings.chromaKeyEnabled) {
     #if XCODE_BETA_16
                                         if #unavailable(visionOS 2.0) {
                                             Text("Chroma-keyed passthrough")
-                                            Text("Requires RealityKit renderer.")
-                                                .font(.system(size: 10))
                                         }
                                         else {
                                             Text("Chroma-keyed passthrough")
                                         }
     #else
                                         Text("Chroma-keyed passthrough")
-                                        Text("Requires RealityKit renderer.")
-                                            .font(.system(size: 10))
     #endif
                                     }
                                     .toggleStyle(.switch)
@@ -325,11 +439,7 @@ struct Entry: View {
                                        }
                                     }
                                 }
-                            }
-                        }
-
-                        GroupBox("Tracking") {
-                            VStack(alignment: .leading, spacing: 12) {
+                                Divider()
                                 Toggle(isOn: $gStore.settings.targetHandsAtRoundtripLatency) {
                                     Text("Predict hands at round-trip latency")
                                     Text("May increase jitter.")
@@ -338,26 +448,48 @@ struct Entry: View {
                                 .toggleStyle(.switch)
 
                                 if gStore.settings.experimental40ppd {
+                                    Divider()
                                     Toggle(isOn: $gStore.settings.enablePersonaFaceTracking) {
-                                        Text("Spatial Persona face tracking (beta)")
-                                        Text("Requires RealityKit renderer.")
-                                            .font(.system(size: 10))
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            Text("Spatial Persona face tracking")
+                                            Text("Beta")
+                                                .font(.system(size: 10))
+                                                .foregroundStyle(.secondary)
+                                        }
                                     }
                                     .toggleStyle(.switch)
 
-                                    Toggle(isOn: $gStore.settings.showFaceTrackingDebug) {
-                                        Text("Face tracking debug overlay")
-                                        Text("Requires RealityKit renderer.")
-                                            .font(.system(size: 10))
+                                    if gStore.settings.enablePersonaFaceTracking {
+                                        Toggle(isOn: $gStore.settings.showFaceTrackingDebug) {
+                                            Text("Face tracking debug overlay")
+                                        }
+                                        .toggleStyle(.switch)
                                     }
-                                    .toggleStyle(.switch)
                                 }
+
+#if IS_ALVR_TESTFLIGHT
+                                Divider()
+                                Toggle(isOn: $gStore.settings.forceMipmapEyeTracking) {
+                                    Text("Force visionOS 1.x eye tracking")
+                                    Text("Requires RealityKit renderer. Faster, but blocks left eye FoV.")
+                                        .font(.system(size: 10))
+                                    Text("Use Control Center > View Recording to select ALVR.")
+                                        .font(.system(size: 10))
+                                }
+                                .toggleStyle(.switch)
+#endif
                             }
                         }
 
                         GroupBox("Comfort & Safety") {
                             VStack(alignment: .leading, spacing: 12) {
-                                Text("FoV scale").frame(maxWidth: .infinity, alignment: .leading)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("FoV scale")
+                                    Text("Adjusts field of view for comfort vs sharpness.")
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(.secondary)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
                                 HStack {
                                    Slider(value: $gStore.settings.fovRenderScale,
                                           in: 0.2...1.6,
@@ -374,9 +506,8 @@ struct Entry: View {
                                    }
                                    .frame(width: 90)
                                 }
-                                Text("Wider FoV improves comfort; narrower FoV improves sharpness.")
-                                    .font(.system(size: 10))
-                                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                                Divider()
 
                                 Toggle(isOn: Binding(
                                     get: { gStore.settings.chaperoneDistanceCm > 0 },
@@ -385,14 +516,18 @@ struct Entry: View {
                                         saveAction()
                                     }
                                 )) {
-                                    Text("Proximity chaperone")
-                                    Text("Highlights nearby objects.")
-                                        .font(.system(size: 10))
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text("Proximity chaperone")
+                                        Text("Highlights nearby real-world objects as you approach them.")
+                                            .font(.system(size: 10))
+                                            .foregroundStyle(.secondary)
+                                    }
                                 }
                                 .toggleStyle(.switch)
 
                                 if gStore.settings.chaperoneDistanceCm > 0 {
-                                    Text("Chaperone distance").frame(maxWidth: .infinity, alignment: .leading)
+                                    Text("Personal bubble size")
+                                        .frame(maxWidth: .infinity, alignment: .leading)
                                     HStack {
                                        Slider(value: Binding(
                                            get: { Double(gStore.settings.chaperoneDistanceCm) },
@@ -422,35 +557,12 @@ struct Entry: View {
                             }
                         }
 
-                        GroupBox("Window") {
-                            VStack(alignment: .leading, spacing: 12) {
-                                Toggle(isOn: $gStore.settings.dismissWindowOnEnter) {
-                                    Text("Close window on entry")
-                                }
-                                .toggleStyle(.switch)
-                            }
-                        }
-
-#if IS_ALVR_TESTFLIGHT
-                        if gStore.settings.experimental40ppd {
-                            GroupBox("TestFlight") {
-                                VStack(alignment: .leading, spacing: 12) {
-                                   Toggle(isOn: $gStore.settings.forceMipmapEyeTracking) {
-                                        Text("Force visionOS 1.x eye tracking")
-                                        Text("Requires RealityKit renderer. Faster, but blocks left eye FoV.")
-                                            .font(.system(size: 10))
-                                        Text("Use Control Center > View Recording to select ALVR.")
-                                            .font(.system(size: 10))
-                                    }
-                                    .toggleStyle(.switch)
-                                }
-                            }
-                        }
-#endif
                     }
                     .frame(minWidth: 450)
                     .padding()
                 }
+                .glassBackgroundEffect(in: RoundedRectangle(cornerRadius: 24))
+                .padding(.horizontal)
                 .tabItem {
                     Label("Settings", systemImage: "gearshape")
                 }
@@ -493,6 +605,8 @@ struct Entry: View {
                     .frame(width: 450)
                     .padding()
                 }
+                .glassBackgroundEffect(in: RoundedRectangle(cornerRadius: 24))
+                .padding(.horizontal)
                 .tabItem {
                     Label("Help and Information", systemImage: "questionmark.circle")
                 }
@@ -501,7 +615,6 @@ struct Entry: View {
             .padding(.horizontal)
         }
         .frame(minWidth: 650, maxWidth: 650)
-        .glassBackgroundEffect()
         .onChange(of: scenePhase) {
             switch scenePhase {
             case .background:
