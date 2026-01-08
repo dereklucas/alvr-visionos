@@ -15,6 +15,8 @@ import Spatial
 import ARKit
 import VideoToolbox
 import ObjectiveC
+import OSLog
+import UIKit
 
 // The 256 byte aligned size of our uniform structure
 let alignedUniformsSize = (MemoryLayout<UniformsArray>.size + 0xFF) & -0x100
@@ -133,6 +135,9 @@ class Renderer {
     var roundTripRenderTime: Double = 0.0
     var lastRoundTripRenderTimestamp: Double = 0.0
     var currentYuvTransform: simd_float4x4 = matrix_identity_float4x4
+
+    private let rendererLogger = Logger(subsystem: "ALVRClient", category: "MetalRenderer")
+    private var diagnostics = RendererDiagnostics()
     
     // Was curious if it improved; it's still juddery.
     var useApplesReprojection = false
@@ -263,9 +268,44 @@ class Renderer {
         
         rebuildRenderPipelines()
 
+        if DebugSettings.debugLoggingEnabled {
+            logStartupDetails()
+        }
+
         EventHandler.shared.handleRenderStarted()
         EventHandler.shared.renderStarted = true
     }
+
+    private struct RendererDiagnostics {
+        var lastLogTime: TimeInterval = 0.0
+        var frameCount: Int = 0
+        var lastDrawableKey: String = ""
+        var lastFoveationEnabled: Bool? = nil
+        var lastLayoutDescription: String? = nil
+        var lastColorFormat: MTLPixelFormat? = nil
+        var lastMaxRenderQualityDescription: String? = nil
+        var lastRenderQualityDescription: String? = nil
+    }
+
+    private func logStartupDetails() {
+        rendererLogger.info("OS version=\(ProcessInfo.processInfo.operatingSystemVersionString, privacy: .public) deviceModel=\(UIDevice.current.model, privacy: .public)")
+        guard let layerRenderer else {
+            rendererLogger.info("LayerRenderer=nil (RealityKit renderer).")
+            return
+        }
+        rendererLogger.info(
+            "LayerRenderer configuration foveation=\(layerRenderer.configuration.isFoveationEnabled, privacy: .public) layout=\(String(describing: layerRenderer.configuration.layout), privacy: .public) colorFormat=\(String(describing: layerRenderer.configuration.colorFormat), privacy: .public) depthFormat=\(String(describing: layerRenderer.configuration.depthFormat), privacy: .public)"
+        )
+#if XCODE_BETA_26
+        if #available(visionOS 26.0, *) {
+            let maxQualityDescription = String(describing: layerRenderer.configuration.maxRenderQuality)
+            rendererLogger.info("LayerRenderer configuration maxRenderQuality=\(maxQualityDescription, privacy: .public)")
+            let renderQualityDescription = String(describing: layerRenderer.renderQuality)
+            rendererLogger.info("LayerRenderer renderQuality=\(renderQualityDescription, privacy: .public)")
+        }
+#endif
+    }
+
     
     func rebuildRenderPipelines() {
         guard let settings = Settings.getAlvrSettings() else {
@@ -955,7 +995,8 @@ class Renderer {
             
             // TODO: check layerRenderer.configuration.layout == .layered ?
             let viewports = drawable.views.map { $0.textureMap.viewport }
-            let rasterizationRateMap = drawable.rasterizationRateMaps.first
+            let useFoveationMaps = DebugSettings.enableFoveationMaps && !DebugSettings.forceFoveationOff
+            let rasterizationRateMap = useFoveationMaps ? drawable.rasterizationRateMaps.first : nil
             let viewTransforms = drawable.views.map { $0.transform }
             let sentViewTangents = drawable.views.enumerated().map { (idx, v) in EventHandler.shared.sentViewTangents[idx] }
             let realViewTangents = drawable.views.enumerated().map { (idx, v) in EventHandler.shared.realViewTangents[idx] }
@@ -963,6 +1004,15 @@ class Renderer {
             let farZ = Double(drawable.depthRange.x)
             let simdDeviceAnchor = WorldTracker.shared.floorCorrectionTransform.asFloat4x4() * (deviceAnchor?.originFromAnchorTransform ?? matrix_identity_float4x4)
             let framePose = framePreviouslyPredictedPose ?? matrix_identity_float4x4
+
+            if DebugSettings.debugLoggingEnabled {
+                logDiagnosticsIfNeeded(
+                    drawable: drawable,
+                    queuedFrame: queuedFrame,
+                    useFoveationMaps: useFoveationMaps,
+                    rasterizationRateMap: rasterizationRateMap
+                )
+            }
             
 #if DEBUG_ALVR_TRACKING
             WorldTracker.shared.lockDebuggables()
@@ -1020,6 +1070,104 @@ class Renderer {
         
         EventHandler.shared.lastQueuedFrame = queuedFrame
         EventHandler.shared.lastQueuedFramePose = framePreviouslyPredictedPose
+    }
+
+    private func logDiagnosticsIfNeeded(drawable: LayerRenderer.Drawable, queuedFrame: QueuedFrame?, useFoveationMaps: Bool, rasterizationRateMap: MTLRasterizationRateMap?) {
+        let now = CACurrentMediaTime()
+        diagnostics.frameCount += 1
+
+        if diagnostics.lastLogTime == 0.0 {
+            diagnostics.lastLogTime = now
+        }
+
+        if let configuration = layerRenderer?.configuration {
+            let foveationEnabled = configuration.isFoveationEnabled
+            if diagnostics.lastFoveationEnabled != foveationEnabled {
+                diagnostics.lastFoveationEnabled = foveationEnabled
+                rendererLogger.info("Foveation toggled: enabled=\(foveationEnabled, privacy: .public)")
+            }
+            let layoutDescription = String(describing: configuration.layout)
+            if diagnostics.lastLayoutDescription != layoutDescription {
+                diagnostics.lastLayoutDescription = layoutDescription
+                rendererLogger.info("Layout changed: \(layoutDescription, privacy: .public)")
+            }
+            if diagnostics.lastColorFormat != configuration.colorFormat {
+                diagnostics.lastColorFormat = configuration.colorFormat
+                rendererLogger.info("Color format changed: \(String(describing: configuration.colorFormat), privacy: .public)")
+            }
+#if XCODE_BETA_26
+            if #available(visionOS 26.0, *) {
+                let maxQualityDescription = String(describing: configuration.maxRenderQuality)
+                if diagnostics.lastMaxRenderQualityDescription != maxQualityDescription {
+                    diagnostics.lastMaxRenderQualityDescription = maxQualityDescription
+                    rendererLogger.info("Max render quality changed: \(maxQualityDescription, privacy: .public)")
+                }
+                let renderQualityDescription = String(describing: layerRenderer?.renderQuality)
+                if diagnostics.lastRenderQualityDescription != renderQualityDescription {
+                    diagnostics.lastRenderQualityDescription = renderQualityDescription
+                    rendererLogger.info("Render quality changed: \(renderQualityDescription, privacy: .public)")
+                }
+            }
+#endif
+        }
+
+        let drawableKey = "\(drawable.colorTextures.map { "\($0.width)x\($0.height)" }.joined(separator: ","))|\(drawable.colorTextures.count)|\(drawable.depthTextures.first?.width ?? 0)x\(drawable.depthTextures.first?.height ?? 0)"
+        if diagnostics.lastDrawableKey != drawableKey {
+            diagnostics.lastDrawableKey = drawableKey
+            rendererLogger.info("Drawable size changed: color=\(drawableKey, privacy: .public) views=\(drawable.views.count, privacy: .public)")
+        }
+
+        let elapsed = now - diagnostics.lastLogTime
+        if elapsed < 1.0 {
+            return
+        }
+
+        let fps = Double(diagnostics.frameCount) / elapsed
+        diagnostics.frameCount = 0
+        diagnostics.lastLogTime = now
+
+        let streamEvent = EventHandler.shared.streamEvent?.STREAMING_STARTED
+        let expectedEyeWidth = streamEvent.map { Int($0.view_width) } ?? 0
+        let expectedEyeHeight = streamEvent.map { Int($0.view_height) } ?? 0
+        let viewCount = max(drawable.views.count, 1)
+        let totalWidth = expectedEyeWidth > 0 ? expectedEyeWidth * viewCount : 0
+        let expectedSummary = expectedEyeWidth > 0 ? "perEye=\(expectedEyeWidth)x\(expectedEyeHeight) total=\(totalWidth)x\(expectedEyeHeight)" : "unknown"
+
+        var decodedSummary = "none"
+        if let imageBuffer = queuedFrame?.imageBuffer {
+            let width = CVPixelBufferGetWidth(imageBuffer)
+            let height = CVPixelBufferGetHeight(imageBuffer)
+            decodedSummary = "\(width)x\(height)"
+        }
+
+        let colorTexture = drawable.colorTextures.first
+        let depthTexture = drawable.depthTextures.first
+        let colorDetails = drawable.colorTextures.enumerated().map { index, texture in
+            "c\(index)=\(texture.width)x\(texture.height)"
+        }.joined(separator: ",")
+        let colorSummary = colorTexture.map {
+            "\(colorDetails) array=\($0.arrayLength) format=\(String(describing: $0.pixelFormat)) storage=\(String(describing: $0.storageMode)) type=\(String(describing: $0.textureType))"
+        } ?? "none"
+        let depthSummary = depthTexture.map { "\($0.width)x\($0.height) format=\(String(describing: $0.pixelFormat)) storage=\(String(describing: $0.storageMode))" } ?? "none"
+
+        let ratioWidth = expectedEyeWidth > 0 ? Double(colorTexture?.width ?? 0) / Double(expectedEyeWidth) : 0.0
+        let ratioHeight = expectedEyeHeight > 0 ? Double(colorTexture?.height ?? 0) / Double(expectedEyeHeight) : 0.0
+
+        var vrrSummary = "disabled"
+        if let rasterizationRateMap {
+            let screenSize = rasterizationRateMap.screenSize
+            let layerCount = rasterizationRateMap.layerCount
+            let physSizeL = rasterizationRateMap.physicalSize(layer: 0)
+            let physSizeR = layerCount > 1 ? rasterizationRateMap.physicalSize(layer: 1) : physSizeL
+            vrrSummary = "map=present screen=\(screenSize.width)x\(screenSize.height) physL=\(physSizeL.width)x\(physSizeL.height) physR=\(physSizeR.width)x\(physSizeR.height) layers=\(layerCount)"
+        } else {
+            vrrSummary = useFoveationMaps ? "map=nil" : "map=disabled"
+        }
+
+        let foveationEnabled = layerRenderer?.configuration.isFoveationEnabled ?? false
+        rendererLogger.info(
+            "RenderStats fps=\(fps, privacy: .public) foveation=\(foveationEnabled, privacy: .public) stream=\(expectedSummary, privacy: .public) decoded=\(decodedSummary, privacy: .public) drawableColor=\(colorSummary, privacy: .public) drawableDepth=\(depthSummary, privacy: .public) ratio=\(ratioWidth, privacy: .public)x\(ratioHeight, privacy: .public) vrr=\(vrrSummary, privacy: .public)"
+        )
     }
     
     // Pulse the wireframe between cyan and blue.

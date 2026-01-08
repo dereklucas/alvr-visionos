@@ -14,18 +14,26 @@
 
 import SwiftUI
 import CompositorServices
+import OSLog
+import Metal
 
 struct ContentStageConfiguration: CompositorLayerConfiguration {
+    private static let logger = Logger(subsystem: "ALVRClient", category: "CompositorConfig")
+    private static var didLogConfiguration = false
+
     func makeConfiguration(capabilities: LayerRenderer.Capabilities, configuration: inout LayerRenderer.Configuration) {
         configuration.depthFormat = .depth32Float
-        configuration.colorFormat = .bgra8Unorm_srgb
-    
-        let foveationEnabled = capabilities.supportsFoveation
+        let defaultColorFormat = MTLPixelFormat.rgba16Float
+        configuration.colorFormat = DebugSettings.resolvedColorFormat(default: defaultColorFormat)
+
+        let foveationEnabled = capabilities.supportsFoveation && !DebugSettings.forceFoveationOff
         configuration.isFoveationEnabled = foveationEnabled
 
 #if XCODE_BETA_26
         if #available(visionOS 26.0, *) {
-            if foveationEnabled {
+            if let override = DebugSettings.maxRenderQualityOverride {
+                configuration.maxRenderQuality = .init(Float(override))
+            } else if foveationEnabled {
                 configuration.maxRenderQuality = .init(1.0)
             }
             //configuration.drawableRenderContextRasterSampleCount = 1
@@ -35,9 +43,38 @@ struct ContentStageConfiguration: CompositorLayerConfiguration {
         let options: LayerRenderer.Capabilities.SupportedLayoutsOptions = foveationEnabled ? [.foveationEnabled] : []
         let supportedLayouts = capabilities.supportedLayouts(options: options)
         
-        configuration.layout = supportedLayouts.contains(.layered) ? .layered : .dedicated
-        
-        configuration.colorFormat = .rgba16Float
+        var selectedLayout = configuration.layout
+        selectedLayout = supportedLayouts.contains(.layered) ? .layered : .dedicated
+        switch DebugSettings.forceLayout {
+        case .auto:
+            break
+        case .layered:
+            if supportedLayouts.contains(.layered) {
+                selectedLayout = .layered
+            }
+        case .dedicated:
+            if supportedLayouts.contains(.dedicated) {
+                selectedLayout = .dedicated
+            }
+        }
+        configuration.layout = selectedLayout
+
+        if DebugSettings.debugLoggingEnabled && !Self.didLogConfiguration {
+            Self.didLogConfiguration = true
+            let configurationSnapshot = configuration
+            let supportedNoFoveation = capabilities.supportedLayouts(options: [])
+            Self.logger.info(
+                "Capabilities foveation=\(capabilities.supportsFoveation, privacy: .public) layouts(noFoveation)=\(String(describing: supportedNoFoveation), privacy: .public) layouts(foveation)=\(String(describing: supportedLayouts), privacy: .public)"
+            )
+            Self.logger.info(
+                "Configuration foveation=\(foveationEnabled, privacy: .public) layout=\(String(describing: configurationSnapshot.layout), privacy: .public) colorFormat=\(String(describing: configurationSnapshot.colorFormat), privacy: .public) depthFormat=\(String(describing: configurationSnapshot.depthFormat), privacy: .public)"
+            )
+#if XCODE_BETA_26
+            if #available(visionOS 26.0, *) {
+                Self.logger.info("Configuration maxRenderQuality=\(String(describing: configurationSnapshot.maxRenderQuality), privacy: .public)")
+            }
+#endif
+        }
     }
 }
 

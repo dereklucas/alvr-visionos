@@ -23,6 +23,7 @@
 		C5E5903E2B6379EE00328ED6 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = C5E5903D2B6379EE00328ED6 /* Assets.xcassets */; };
 		D61E6FE02B71CE080076031A /* VideoHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = D61E6FDF2B71CE080076031A /* VideoHandler.swift */; };
 		D68FA8092B742F6F0052B7FF /* FFR.swift in Sources */ = {isa = PBXBuildFile; fileRef = D68FA8082B742F6F0052B7FF /* FFR.swift */; };
+		E7B0F8A92F1A000100000001 /* DebugSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7B0F8A82F1A000100000001 /* DebugSettings.swift */; };
 		E702FBDC2B899B8700EE75D0 /* GlobalSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = E702FBDB2B899B8300EE75D0 /* GlobalSettings.swift */; };
 		E70C9AEA2C9377F50035B4F9 /* Codable.swift in Sources */ = {isa = PBXBuildFile; fileRef = E70C9AE92C9377F20035B4F9 /* Codable.swift */; };
 		E71352CE2DF784C60079F12B /* GCController.swift in Sources */ = {isa = PBXBuildFile; fileRef = E71352CD2DF784BF0079F12B /* GCController.swift */; };
@@ -108,6 +109,7 @@
 		D68FA8042B73D5DD0052B7FF /* ALVRClient.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = ALVRClient.xcconfig; sourceTree = "<group>"; };
 		D68FA8052B73D6260052B7FF /* Override.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Override.xcconfig; sourceTree = "<group>"; };
 		D68FA8082B742F6F0052B7FF /* FFR.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FFR.swift; sourceTree = "<group>"; };
+		E7B0F8A82F1A000100000001 /* DebugSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugSettings.swift; sourceTree = "<group>"; };
 		E702FBDB2B899B8300EE75D0 /* GlobalSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlobalSettings.swift; sourceTree = "<group>"; };
 		E70C9AE92C9377F20035B4F9 /* Codable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Codable.swift; sourceTree = "<group>"; };
 		E71352CD2DF784BF0079F12B /* GCController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GCController.swift; sourceTree = "<group>"; };
@@ -216,6 +218,7 @@
 				8E458AB22B7E05FB0019FC73 /* EventHandler.swift */,
 				E77FDE572EC5D97F00B0ED4F /* CameraView.swift */,
 				D68FA8082B742F6F0052B7FF /* FFR.swift */,
+				E7B0F8A82F1A000100000001 /* DebugSettings.swift */,
 				E702FBDB2B899B8300EE75D0 /* GlobalSettings.swift */,
 				0FDF7F3AB0664D5089D91DE3 /* PerformanceTracker.swift */,
 				5BD00478C3614F7DB55D935E /* PerformanceOverlayView.swift */,
@@ -398,6 +401,7 @@
 				8E1240FF2B7CC02E005B75F2 /* Entry.swift in Sources */,
 				E7A98A9E2BE2EEAB003DF333 /* DummyMetalRenderer.swift in Sources */,
 				E71DEF9A2C18D4B4008A2074 /* ALVRTypes.swift in Sources */,
+				E7B0F8A92F1A000100000001 /* DebugSettings.swift in Sources */,
 				E702FBDC2B899B8700EE75D0 /* GlobalSettings.swift in Sources */,
 				93F10375671142039BA634E8 /* PerformanceTracker.swift in Sources */,
 				E7AC9193873D48A2B7122E11 /* PerformanceOverlayView.swift in Sources */,
