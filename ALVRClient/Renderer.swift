@@ -293,6 +293,7 @@ class Renderer {
             rendererLogger.info("LayerRenderer=nil (RealityKit renderer).")
             return
         }
+        rendererLogger.info("DebugSettings \(DebugSettings.logDescription(), privacy: .public)")
         rendererLogger.info(
             "LayerRenderer configuration foveation=\(layerRenderer.configuration.isFoveationEnabled, privacy: .public) layout=\(String(describing: layerRenderer.configuration.layout), privacy: .public) colorFormat=\(String(describing: layerRenderer.configuration.colorFormat), privacy: .public) depthFormat=\(String(describing: layerRenderer.configuration.depthFormat), privacy: .public)"
         )

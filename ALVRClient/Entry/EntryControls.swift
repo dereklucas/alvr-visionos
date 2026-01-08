@@ -34,7 +34,6 @@ struct EntryControls: View {
                     .labelStyle(.titleOnly)
                     .padding(15)
             }
-            
         }
         .toggleStyle(.button)
         .buttonStyle(.borderless)
@@ -97,6 +96,86 @@ struct EntryControls: View {
                 }
             }
         }
+    }
+}
 
+struct DebugControlsView: View {
+#if DEBUG
+    private static let defaultDebugLoggingEnabledValue = true
+#else
+    private static let defaultDebugLoggingEnabledValue = false
+#endif
+    
+    @State private var didLoadDebugDefaults = false
+    @State private var enableMaxRenderQualityOverride = false
+    @State private var maxRenderQualityText = "1.0"
+
+    @AppStorage("ALVRDebugLoggingEnabled") private var debugLoggingEnabled = defaultDebugLoggingEnabledValue
+    @AppStorage("ALVRForceFoveationOff") private var forceFoveationOff = false
+    @AppStorage("ALVREnableFoveationMaps") private var enableFoveationMaps = true
+    @AppStorage("ALVRForceLayout") private var forceLayout = "auto"
+    @AppStorage("ALVRForceColorFormat") private var forceColorFormat = "default"
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Toggle("Debug Logging", isOn: $debugLoggingEnabled)
+            Toggle("Force Foveation Off", isOn: $forceFoveationOff)
+            Toggle("Use Foveation Maps", isOn: $enableFoveationMaps)
+
+            Picker("Layout", selection: $forceLayout) {
+                Text("Auto").tag("auto")
+                Text("Layered").tag("layered")
+                Text("Dedicated").tag("dedicated")
+            }
+            .pickerStyle(.segmented)
+
+            Picker("Color Format", selection: $forceColorFormat) {
+                Text("Default").tag("default")
+                Text("BGRA8 sRGB").tag("bgra8UnormSrgb")
+                Text("RGBA16F").tag("rgba16Float")
+            }
+            .pickerStyle(.segmented)
+
+            HStack {
+                Toggle("Max Render Quality Override", isOn: $enableMaxRenderQualityOverride)
+                TextField("1.0", text: $maxRenderQualityText)
+                    .frame(width: 60)
+                    .textInputAutocapitalization(.never)
+            }
+        }
+        .onAppear {
+            if !didLoadDebugDefaults {
+                didLoadDebugDefaults = true
+                loadMaxRenderQualityDefaults()
+            }
+        }
+        .onChange(of: enableMaxRenderQualityOverride) { _, _ in
+            updateMaxRenderQualityOverride()
+        }
+        .onChange(of: maxRenderQualityText) { _, _ in
+            updateMaxRenderQualityOverride()
+        }
+    }
+
+    private func loadMaxRenderQualityDefaults() {
+        let defaults = UserDefaults.standard
+        if let value = defaults.object(forKey: "ALVRMaxRenderQuality") as? Double {
+            enableMaxRenderQualityOverride = true
+            maxRenderQualityText = String(value)
+        } else {
+            enableMaxRenderQualityOverride = false
+            maxRenderQualityText = "1.0"
+        }
+    }
+
+    private func updateMaxRenderQualityOverride() {
+        let defaults = UserDefaults.standard
+        if !enableMaxRenderQualityOverride {
+            defaults.removeObject(forKey: "ALVRMaxRenderQuality")
+            return
+        }
+        if let value = Double(maxRenderQualityText) {
+            defaults.set(value, forKey: "ALVRMaxRenderQuality")
+        }
     }
 }

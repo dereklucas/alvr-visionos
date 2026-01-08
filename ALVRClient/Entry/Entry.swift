@@ -29,7 +29,6 @@ struct Entry: View {
     private let logoLogger = Logger(subsystem: "alvr.client", category: "Entry")
     
     @State private var chromaRangeMaximum: Float = 1.0
-    @State private var portalGlowOn = false
     func applyRangeSettings() {
         if gStore.settings.chromaKeyDistRangeMax < 0.001 {
             gStore.settings.chromaKeyDistRangeMax = 0.001
@@ -179,7 +178,6 @@ struct Entry: View {
     }
 
     var body: some View {
-        let canShowStreamPreview = eventHandler.streamingActive && Settings.getAlvrSettings() != nil
         VStack(spacing: 16) {
             TabView {
                 VStack(spacing: 16) {
@@ -191,76 +189,8 @@ struct Entry: View {
                         .accessibilityLabel("ALVR logo")
                         .frame(maxWidth: 280, maxHeight: 80)
 
-                    GroupBox("Stream Portal") {
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 28)
-                                .fill(.ultraThinMaterial)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 28)
-                                        .strokeBorder(.white.opacity(0.15), lineWidth: 1)
-                                )
-
-                            if canShowStreamPreview {
-                                RealityKitClientView(isPreview: true)
-                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                                    .clipShape(RoundedRectangle(cornerRadius: 24))
-                                    .padding(8)
-                                    .allowsHitTesting(false)
-                            }
-
-                            TimelineView(.animation) { context in
-                                let angle = Angle.degrees(context.date.timeIntervalSinceReferenceDate * 20)
-                                RoundedRectangle(cornerRadius: 24)
-                                    .fill(
-                                        AngularGradient(
-                                            gradient: Gradient(colors: [
-                                                Color.teal.opacity(0.35),
-                                                Color.white.opacity(0.15),
-                                                Color.teal.opacity(0.5),
-                                                Color.white.opacity(0.08),
-                                                Color.teal.opacity(0.35)
-                                            ]),
-                                            center: .center,
-                                            angle: angle
-                                        )
-                                    )
-                                    .blendMode(.screen)
-                                    .padding(10)
-                                    .opacity(canShowStreamPreview ? 0.25 : 1)
-                            }
-
-                            RoundedRectangle(cornerRadius: 22)
-                                .strokeBorder(
-                                    LinearGradient(
-                                        colors: [
-                                            Color.white.opacity(0.3),
-                                            Color.teal.opacity(0.6),
-                                            Color.white.opacity(0.15)
-                                        ],
-                                        startPoint: .topLeading,
-                                        endPoint: .bottomTrailing
-                                    ),
-                                    lineWidth: 1.5
-                                )
-                                .padding(14)
-                                .blur(radius: portalGlowOn ? 0.2 : 0.8)
-                                .opacity(portalGlowOn ? 0.9 : 0.6)
-
-                            if !canShowStreamPreview {
-                                VStack(spacing: 8) {
-                                    ProgressView()
-                                    Text(eventHandler.streamingActive ? "Starting stream…" : "Waiting for stream…")
-                                        .font(.system(size: 13, weight: .semibold))
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                        }
-                        .frame(height: 170)
-                        .onAppear {
-                            withAnimation(.easeInOut(duration: 2.6).repeatForever(autoreverses: true)) {
-                                portalGlowOn = true
-                            }
-                        }
+                    GroupBox("Debug") {
+                        DebugControlsView()
                     }
                     .glassBackgroundEffect(in: RoundedRectangle(cornerRadius: 22))
 

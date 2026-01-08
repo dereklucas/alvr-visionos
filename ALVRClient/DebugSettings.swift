@@ -82,4 +82,9 @@ struct DebugSettings {
             return .rgba16Float
         }
     }
+
+    static func logDescription() -> String {
+        let maxQuality = maxRenderQualityOverride.map { String($0) } ?? "nil"
+        return "logging=\(debugLoggingEnabled) foveationOff=\(forceFoveationOff) foveationMaps=\(enableFoveationMaps) layout=\(forceLayout.rawValue) colorFormat=\(forceColorFormat.rawValue) maxRenderQuality=\(maxQuality)"
+    }
 }
