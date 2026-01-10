@@ -28,6 +28,7 @@ struct GlobalSettings: Codable {
     var targetHandsAtRoundtripLatency = false
     var enablePersonaFaceTracking = false
     var showFaceTrackingDebug = false
+    var showPinchRayDebug = false
     var lastUsedAppVersion = "never launched"
     var chaperoneDistanceCm: Int = 0
     var showPerformanceHud: Bool = false
@@ -57,6 +58,7 @@ struct GlobalSettings: Codable {
         self.targetHandsAtRoundtripLatency = try container.decodeIfPresent(Bool.self, forKey: .targetHandsAtRoundtripLatency) ?? self.targetHandsAtRoundtripLatency
         self.enablePersonaFaceTracking = try container.decodeIfPresent(Bool.self, forKey: .enablePersonaFaceTracking) ?? self.enablePersonaFaceTracking
         self.showFaceTrackingDebug = try container.decodeIfPresent(Bool.self, forKey: .showFaceTrackingDebug) ?? self.showFaceTrackingDebug
+        self.showPinchRayDebug = try container.decodeIfPresent(Bool.self, forKey: .showPinchRayDebug) ?? self.showPinchRayDebug
         self.lastUsedAppVersion = try container.decodeIfPresent(String.self, forKey: .lastUsedAppVersion) ?? self.lastUsedAppVersion
         self.chaperoneDistanceCm = try container.decodeIfPresent(Int.self, forKey: .chaperoneDistanceCm) ?? self.chaperoneDistanceCm
         self.showPerformanceHud = try container.decodeIfPresent(Bool.self, forKey: .showPerformanceHud) ?? self.showPerformanceHud

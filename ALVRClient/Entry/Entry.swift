@@ -361,6 +361,16 @@ struct Entry: View {
                                     Text("Gaze-pinch as controller input")
                                 }
                                 .toggleStyle(.switch)
+
+                                Toggle(isOn: $gStore.settings.showPinchRayDebug) {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text("Show pinch ray debug")
+                                        Text("Draws the resolved hit point and ray in the debug overlay.")
+                                            .font(.system(size: 10))
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                .toggleStyle(.switch)
                             }
                         }
 

@@ -242,6 +242,20 @@ class WorldTracker {
         let boundingRadius: Float
     }
 
+    struct CachedMeshData {
+        let id: UUID
+        let transform: simd_float4x4
+        let vertices: [simd_float3]
+        let indices: [UInt32]
+        let boundsCenter: simd_float3
+        let boundsRadius: Float
+    }
+
+    struct SelectionRayHit {
+        let point: simd_float3
+        let normal: simd_float3
+    }
+
     let arSession: ARKitSession!
     var worldTracking: WorldTrackingProvider!
     var handTracking: HandTrackingProvider!
@@ -255,12 +269,15 @@ class WorldTracker {
     // Playspace and boundaries state
     var planeAnchors: [UUID: PlaneAnchor] = [:]
     var planeCache: [UUID: CachedPlaneData] = [:]
+    var meshAnchors: [UUID: ARKit.MeshAnchor] = [:]
+    var meshCache: [UUID: CachedMeshData] = [:]
     var worldAnchors: [UUID: WorldAnchor] = [:]
     var worldAnchorsToRemove: [WorldAnchor] = []
     var worldTrackingAddedOriginAnchor = false
     var worldTrackingSteamVRTransform: simd_float4x4 = matrix_identity_float4x4
     var worldOriginAnchor: WorldAnchor? = nil
     var planeLock = NSObject()
+    var meshLock = NSObject()
     var lastUpdatedTs: TimeInterval = 0
     var crownPressCount = 0
     var sentPoses = 0
@@ -278,6 +295,8 @@ class WorldTracker {
     var lastRightHandPose: AlvrPose = AlvrPose()
     var lastRightHandVel: (Float, Float, Float) = (0,0,0)
     var lastRightHandAngVel: (Float, Float, Float) = (0,0,0)
+    var lastLeftHandAnchor: HandAnchor? = nil
+    var lastRightHandAnchor: HandAnchor? = nil
     
     // Controller haptics
     var leftHapticsStart: TimeInterval = 0
@@ -428,6 +447,8 @@ class WorldTracker {
     var leftPinchCurrentPosition = simd_float3(0.0, 0.0, 0.0)
     var leftPinchStartAngle = simd_quatf()
     var leftPinchCurrentAngle = simd_quatf()
+    var lastLeftPinchTarget = simd_float3(0.0, 0.0, 0.0)
+    var lastLeftPinchNormal = simd_float3(0.0, 0.0, 0.0)
     var leftIsPinching = false
     var lastLeftIsPinching = false
     var leftPinchTrigger: Float = 0.0
@@ -440,6 +461,8 @@ class WorldTracker {
     var rightPinchCurrentPosition = simd_float3(0.0, 0.0, 0.0)
     var rightPinchStartAngle = simd_quatf()
     var rightPinchCurrentAngle = simd_quatf()
+    var lastRightPinchTarget = simd_float3(0.0, 0.0, 0.0)
+    var lastRightPinchNormal = simd_float3(0.0, 0.0, 0.0)
     var rightIsPinching = false
     var lastRightIsPinching = false
     var rightPinchTrigger: Float = 0.0
@@ -597,7 +620,7 @@ class WorldTracker {
             trackingList.append(handTracking)
         }
         if authStatus[.worldSensing] == .allowed {
-            //trackingList.append(sceneReconstruction)
+            trackingList.append(sceneReconstruction)
             trackingList.append(planeDetection)
         }
 #if XCODE_BETA_26
@@ -619,7 +642,17 @@ class WorldTracker {
             try await arSession.run(trackingList)
             self.arRunning = true
         } catch {
-            fatalError("Failed to initialize ARSession")
+            if let idx = trackingList.firstIndex(where: { $0 === sceneReconstruction }) {
+                trackingList.remove(at: idx)
+                do {
+                    try await arSession.run(trackingList)
+                    self.arRunning = true
+                } catch {
+                    fatalError("Failed to initialize ARSession")
+                }
+            } else {
+                fatalError("Failed to initialize ARSession")
+            }
         }
         objc_sync_exit(arkitLock)
         
@@ -641,9 +674,13 @@ class WorldTracker {
     }
     
     func processReconstructionUpdates() async {
-        for await _ in sceneReconstruction.anchorUpdates {
-            //let meshAnchor = update.anchor
-            //print(meshAnchor.id, meshAnchor.originFromAnchorTransform)
+        for await update in sceneReconstruction.anchorUpdates {
+            switch update.event {
+            case .added, .updated:
+                updateMesh(update.anchor)
+            case .removed:
+                removeMesh(update.anchor)
+            }
         }
     }
     
@@ -950,6 +987,285 @@ class WorldTracker {
             halfHeight: halfHeight,
             boundingRadius: boundingRadius
         )
+    }
+
+    func updateMesh(_ anchor: ARKit.MeshAnchor) {
+        guard let cached = cachedMeshData(from: anchor) else {
+            return
+        }
+        lockMeshAnchors()
+        meshAnchors[anchor.id] = anchor
+        meshCache[anchor.id] = cached
+        unlockMeshAnchors()
+    }
+
+    func removeMesh(_ anchor: ARKit.MeshAnchor) {
+        lockMeshAnchors()
+        meshAnchors.removeValue(forKey: anchor.id)
+        meshCache.removeValue(forKey: anchor.id)
+        unlockMeshAnchors()
+    }
+
+    func lockMeshAnchors() {
+        objc_sync_enter(meshLock)
+    }
+
+    func unlockMeshAnchors() {
+        objc_sync_exit(meshLock)
+    }
+
+    func snapshotMeshData() -> [CachedMeshData] {
+        lockMeshAnchors()
+        let snapshot = meshCache.values.map { $0 }
+        unlockMeshAnchors()
+        return snapshot
+    }
+
+    private func cachedMeshData(from anchor: ARKit.MeshAnchor) -> CachedMeshData? {
+        let geometry = anchor.geometry
+        let verticesSource = geometry.vertices
+        let faces = geometry.faces
+
+        let vertices = extractMeshVertices(verticesSource)
+        let indices = extractMeshIndices(faces)
+        if vertices.isEmpty || indices.isEmpty {
+            return nil
+        }
+
+        var minBounds = simd_float3(Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude)
+        var maxBounds = simd_float3(-Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude)
+        for v in vertices {
+            minBounds = simd_min(minBounds, v)
+            maxBounds = simd_max(maxBounds, v)
+        }
+
+        let boundsCenter = (minBounds + maxBounds) * 0.5
+        let boundsRadius = simd_length(maxBounds - boundsCenter)
+
+        return CachedMeshData(
+            id: anchor.id,
+            transform: anchor.originFromAnchorTransform,
+            vertices: vertices,
+            indices: indices,
+            boundsCenter: boundsCenter,
+            boundsRadius: boundsRadius
+        )
+    }
+
+    private func extractMeshVertices(_ source: ARKit.GeometrySource) -> [simd_float3] {
+        let count = source.count
+        if count == 0 {
+            return []
+        }
+
+        let basePointer = source.buffer.contents().advanced(by: source.offset)
+        var vertices: [simd_float3] = []
+        vertices.reserveCapacity(count)
+
+        for i in 0..<count {
+            let pointer = basePointer.advanced(by: i * source.stride)
+            let x = pointer.load(as: Float.self)
+            let y = pointer.load(fromByteOffset: 4, as: Float.self)
+            let z = pointer.load(fromByteOffset: 8, as: Float.self)
+            vertices.append(simd_float3(x, y, z))
+        }
+
+        return vertices
+    }
+
+    private func extractMeshIndices(_ element: ARKit.GeometryElement) -> [UInt32] {
+        let primitiveCount = element.count
+        let indexCount = primitiveCount * 3
+        if primitiveCount == 0 || indexCount == 0 {
+            return []
+        }
+
+        let basePointer = element.buffer.contents()
+        var indices: [UInt32] = []
+        indices.reserveCapacity(indexCount)
+
+        switch element.bytesPerIndex {
+        case 2:
+            let pointer = basePointer.bindMemory(to: UInt16.self, capacity: indexCount)
+            for i in 0..<indexCount {
+                indices.append(UInt32(pointer[i]))
+            }
+        case 4:
+            let pointer = basePointer.bindMemory(to: UInt32.self, capacity: indexCount)
+            for i in 0..<indexCount {
+                indices.append(pointer[i])
+            }
+        default:
+            return []
+        }
+
+        return indices
+    }
+
+    func raycastSelectionRay(origin: simd_float3, direction: simd_float3, maxDistance: Float) -> SelectionRayHit? {
+        let planes = snapshotPlaneData()
+        var closestT = maxDistance
+        var closestHit: SelectionRayHit? = nil
+
+        for (_, cached) in planes {
+            let denom = simd_dot(direction, cached.normal)
+            if abs(denom) < 0.0001 {
+                continue
+            }
+
+            let t = simd_dot(cached.position - origin, cached.normal) / denom
+            if t <= 0.01 || t > closestT {
+                continue
+            }
+
+            let hit = origin + (direction * t)
+            let local = hit - cached.position
+            let u = simd_dot(local, cached.right)
+            let v = simd_dot(local, cached.forward)
+            if abs(u) <= cached.halfWidth && abs(v) <= cached.halfHeight {
+                var normal = cached.normal
+                if simd_dot(normal, direction) > 0.0 {
+                    normal = -normal
+                }
+                closestT = t
+                closestHit = SelectionRayHit(point: hit, normal: normal)
+            }
+        }
+
+        return closestHit
+    }
+
+    func raycastSceneMesh(origin: simd_float3, direction: simd_float3, maxDistance: Float) -> SelectionRayHit? {
+        let meshes = snapshotMeshData()
+        var closestT = maxDistance
+        var closestHit: SelectionRayHit? = nil
+
+        for cached in meshes {
+            let localRay = rayInLocalSpace(origin: origin, direction: direction, transform: cached.transform)
+            let localOrigin = localRay.origin
+            let localDirection = localRay.direction
+
+            if !rayIntersectsSphere(origin: localOrigin, direction: localDirection, center: cached.boundsCenter, radius: cached.boundsRadius) {
+                continue
+            }
+
+            let indices = cached.indices
+            let vertices = cached.vertices
+            let indexCount = indices.count
+            if indexCount < 3 {
+                continue
+            }
+
+            var i = 0
+            while i + 2 < indexCount {
+                let i0 = Int(indices[i])
+                let i1 = Int(indices[i + 1])
+                let i2 = Int(indices[i + 2])
+                i += 3
+
+                if i0 >= vertices.count || i1 >= vertices.count || i2 >= vertices.count {
+                    continue
+                }
+
+                let v0 = vertices[i0]
+                let v1 = vertices[i1]
+                let v2 = vertices[i2]
+
+                if let t = rayTriangleIntersection(origin: localOrigin, direction: localDirection, v0: v0, v1: v1, v2: v2) {
+                    if t > 0.01 && t < closestT {
+                        closestT = t
+                        let localHit = localOrigin + (localDirection * t)
+                        let worldHit = transformPoint(cached.transform, localHit)
+                        let localNormal = simd_normalize(simd_cross(v1 - v0, v2 - v0))
+                        var worldNormal = transformDirection(cached.transform, localNormal)
+                        if simd_dot(worldNormal, direction) > 0.0 {
+                            worldNormal = -worldNormal
+                        }
+                        closestHit = SelectionRayHit(point: worldHit, normal: worldNormal)
+                    }
+                }
+            }
+        }
+
+        return closestHit
+    }
+
+    func selectionRayTargetPoint(origin: simd_float3, direction: simd_float3, maxDistance: Float) -> SelectionRayHit {
+        if let hit = raycastSceneMesh(origin: origin, direction: direction, maxDistance: maxDistance) {
+            return hit
+        }
+
+        if let hit = raycastSelectionRay(origin: origin, direction: direction, maxDistance: maxDistance) {
+            return hit
+        }
+
+        var fallbackDepth: Float = 2.0
+        if eyeTrackingActive {
+            let clampedDepth = currentVergenceDepth.clamp(0.25, Double(maxDistance))
+            if clampedDepth > 0.0 {
+                fallbackDepth = clampedDepth
+            }
+        }
+
+        let point = origin + (direction * fallbackDepth)
+        return SelectionRayHit(point: point, normal: -direction)
+    }
+
+    private func rayTriangleIntersection(origin: simd_float3, direction: simd_float3, v0: simd_float3, v1: simd_float3, v2: simd_float3) -> Float? {
+        let epsilon: Float = 0.00001
+        let edge1 = v1 - v0
+        let edge2 = v2 - v0
+        let h = simd_cross(direction, edge2)
+        let a = simd_dot(edge1, h)
+        if abs(a) < epsilon {
+            return nil
+        }
+
+        let f = 1.0 / a
+        let s = origin - v0
+        let u = f * simd_dot(s, h)
+        if u < 0.0 || u > 1.0 {
+            return nil
+        }
+
+        let q = simd_cross(s, edge1)
+        let v = f * simd_dot(direction, q)
+        if v < 0.0 || u + v > 1.0 {
+            return nil
+        }
+
+        let t = f * simd_dot(edge2, q)
+        if t > epsilon {
+            return t
+        }
+
+        return nil
+    }
+
+    private func rayInLocalSpace(origin: simd_float3, direction: simd_float3, transform: simd_float4x4) -> (origin: simd_float3, direction: simd_float3) {
+        let inverse = transform.inverse
+        let localOrigin = (inverse * origin.asFloat4_1()).asFloat3()
+        let localDirection = simd_normalize((inverse * direction.asFloat4()).asFloat3())
+        return (localOrigin, localDirection)
+    }
+
+    private func transformPoint(_ transform: simd_float4x4, _ point: simd_float3) -> simd_float3 {
+        return (transform * point.asFloat4_1()).asFloat3()
+    }
+
+    private func transformDirection(_ transform: simd_float4x4, _ direction: simd_float3) -> simd_float3 {
+        return simd_normalize(transform.orientationOnly() * direction)
+    }
+
+    private func rayIntersectsSphere(origin: simd_float3, direction: simd_float3, center: simd_float3, radius: Float) -> Bool {
+        let oc = origin - center
+        let b = simd_dot(oc, direction)
+        let c = simd_dot(oc, oc) - (radius * radius)
+        if c > 0.0 && b > 0.0 {
+            return false
+        }
+        let discriminant = (b * b) - c
+        return discriminant >= 0.0
     }
     
     func lockDebuggables() {
@@ -1269,6 +1585,33 @@ class WorldTracker {
         
         return AlvrDeviceMotion(device_id: device_id, pose: pose, linear_velocity: lin_vel, angular_velocity: ang_vel)
     }
+
+    func handJointWorldPosition(_ hand: HandAnchor, name: String) -> simd_float3? {
+        guard let skeleton = hand.handSkeleton else {
+            return nil
+        }
+        for joint in skeleton.allJoints {
+            if joint.name.description == name {
+                let transform = hand.originFromAnchorTransform * joint.anchorFromJointTransform
+                return transform.columns.3.asFloat3()
+            }
+        }
+        return nil
+    }
+
+    func handPointingRay(_ hand: HandAnchor) -> (origin: simd_float3, direction: simd_float3)? {
+        guard let indexTip = handJointWorldPosition(hand, name: "indexFingerTip"),
+              let indexKnuckle = handJointWorldPosition(hand, name: "indexFingerKnuckle") else {
+            return nil
+        }
+        let thumbTip = handJointWorldPosition(hand, name: "thumbTip") ?? indexTip
+        let origin = (indexTip + thumbTip) * 0.5
+        var direction = simd_normalize(indexTip - indexKnuckle)
+        if simd_length(direction) < 0.001 {
+            return nil
+        }
+        return (origin, direction)
+    }
     
     func quatDifference(_ a: simd_quatf, _ b: simd_quatf) -> simd_quatf {
         let delta = a * b.inverse
@@ -1314,12 +1657,36 @@ class WorldTracker {
     func pinchToAlvrDeviceMotion(_ chirality: HandAnchor.Chirality) -> AlvrDeviceMotion {
         let isLeft = chirality == .left
         let device_id = isLeft ? WorldTracker.deviceIdLeftHand : WorldTracker.deviceIdRightHand
+
+        var appleOrigin = isLeft ? leftSelectionRayOrigin : rightSelectionRayOrigin
+        var appleDirection = simd_normalize(isLeft ? leftSelectionRayDirection : rightSelectionRayDirection)
+        if let handAnchor = (isLeft ? lastLeftHandAnchor : lastRightHandAnchor),
+           let handRay = handPointingRay(handAnchor) {
+            appleOrigin = handRay.origin
+            appleDirection = handRay.direction
+        }
+
+        let targetHit = selectionRayTargetPoint(origin: appleOrigin, direction: appleDirection, maxDistance: 10.0)
+        let targetPoint = targetHit.point
+        if isLeft {
+            lastLeftPinchTarget = targetPoint
+            lastLeftPinchNormal = targetHit.normal
+        }
+        else {
+            lastRightPinchTarget = targetPoint
+            lastRightPinchNormal = targetHit.normal
+        }
+        let pinchPosition = isLeft ? leftPinchCurrentPosition : rightPinchCurrentPosition
+        let hasPinchPosition = simd_length(pinchPosition) > 0.001
+        let aimOrigin = hasPinchPosition ? pinchPosition : appleOrigin
+        var aimDirectionApple = targetPoint - aimOrigin
+        if simd_length(aimDirectionApple) < 0.001 {
+            aimDirectionApple = appleDirection
+        }
+        aimDirectionApple = simd_normalize(aimDirectionApple)
         
-        let appleOrigin = isLeft ? leftSelectionRayOrigin : rightSelectionRayOrigin
-        let appleDirection = isLeft ? leftSelectionRayDirection : rightSelectionRayDirection
-        
-        let origin = convertApplePositionToSteamVR(appleOrigin)
-        let direction = simd_normalize(convertApplePositionToSteamVR(appleOrigin + appleDirection) - origin)
+        let origin = convertApplePositionToSteamVR(aimOrigin)
+        let direction = simd_normalize(convertApplePositionToSteamVR(aimOrigin + aimDirectionApple) - origin)
         let orient = simd_look(at: -direction)
         
         //let val = sin(Float(CACurrentMediaTime() * 0.25)) + 1.0
@@ -1340,9 +1707,15 @@ class WorldTracker {
         let q = simd_quatf(orient) * adjLeftRight * adjUpDown
         //pinchOffset = simd_float3()
         
-        pinchOffset *= 3.5
+        if hasPinchPosition {
+            pinchOffset = simd_float3()
+        }
+        else {
+            pinchOffset *= 3.5
+        }
         
-        let pose: AlvrPose = AlvrPose(q, convertApplePositionToSteamVR(appleOrigin + (appleDirection * -0.5) + pinchOffset + adjPosition))
+        let basePoint = hasPinchPosition ? pinchPosition : targetPoint
+        let pose: AlvrPose = AlvrPose(q, convertApplePositionToSteamVR(basePoint + pinchOffset + adjPosition))
         
         return AlvrDeviceMotion(device_id: device_id, pose: pose, linear_velocity: (0,0,0), angular_velocity: (0, 0, 0))
     }
@@ -2542,6 +2915,8 @@ class WorldTracker {
             handPoses = handTracking.latestAnchors
 #endif
         }
+        lastLeftHandAnchor = handPoses.leftHand ?? lastLeftHandAnchor
+        lastRightHandAnchor = handPoses.rightHand ?? lastRightHandAnchor
         
         // Skeleton disabling for SteamVR input 2.0
         leftSkeletonDisableHysteresis -= 0.01
@@ -2991,6 +3366,44 @@ class WorldTracker {
         }
         
         WorldTracker.shared.addDebuggablePose((appleOriginFromAnchor.columns.3.asFloat3() - appleOriginFromAnchor.columns.2.asFloat3()).asFloat4x4(), 0.005)
+        if ALVRClientApp.gStore.settings.showPinchRayDebug {
+            func addRayDebug(origin: simd_float3, target: simd_float3, normal: simd_float3) {
+                let length = simd_distance(origin, target)
+                if length < 0.01 {
+                    return
+                }
+                let steps = 6
+                let step = (target - origin) / Float(steps)
+                for i in 0...steps {
+                    WorldTracker.shared.addDebuggablePose((origin + (step * Float(i))).asFloat4x4(), 0.004)
+                }
+                WorldTracker.shared.addDebuggablePose(target.asFloat4x4(), 0.012)
+                if simd_length(normal) > 0.001 {
+                    var up = simd_float3(0.0, 1.0, 0.0)
+                    if abs(simd_dot(normal, up)) > 0.9 {
+                        up = simd_float3(1.0, 0.0, 0.0)
+                    }
+                    let orient = simd_look(at: normal, up: up)
+                    let pose = target.asFloat4x4() * orient
+                    WorldTracker.shared.addDebuggablePose(pose, 0.03)
+                }
+            }
+            
+            if leftIsPinching && simd_length(lastLeftPinchTarget) > 0.001 {
+                var origin = simd_length(leftPinchCurrentPosition) > 0.001 ? leftPinchCurrentPosition : leftSelectionRayOrigin
+                if let anchor = lastLeftHandAnchor, let ray = handPointingRay(anchor) {
+                    origin = ray.origin
+                }
+                addRayDebug(origin: origin, target: lastLeftPinchTarget, normal: lastLeftPinchNormal)
+            }
+            if rightIsPinching && simd_length(lastRightPinchTarget) > 0.001 {
+                var origin = simd_length(rightPinchCurrentPosition) > 0.001 ? rightPinchCurrentPosition : rightSelectionRayOrigin
+                if let anchor = lastRightHandAnchor, let ray = handPointingRay(anchor) {
+                    origin = ray.origin
+                }
+                addRayDebug(origin: origin, target: lastRightPinchTarget, normal: lastRightPinchNormal)
+            }
+        }
         WorldTracker.shared.unlockDebuggables()
 #endif
 
