@@ -6,6 +6,49 @@ import SwiftUI
 import Metal
 import os
 
+@_silgen_name("alvr_get_last_client_statistics")
+private func alvr_get_last_client_statistics(_ outStats: UnsafeMutablePointer<AlvrClientStatisticsC>) -> Bool
+
+private struct AlvrClientStatisticsC {
+    var target_timestamp_ns: UInt64 = 0
+    var frame_interval_ns: UInt64 = 0
+    var video_decode_ns: UInt64 = 0
+    var video_decoder_queue_ns: UInt64 = 0
+    var rendering_ns: UInt64 = 0
+    var vsync_queue_ns: UInt64 = 0
+    var total_pipeline_latency_ns: UInt64 = 0
+}
+
+private struct AlvrClientStatisticsSnapshot {
+    let targetTimestampNs: UInt64
+    let frameIntervalMs: Double
+    let videoDecodeMs: Double
+    let videoDecoderQueueMs: Double
+    let renderingMs: Double
+    let vsyncQueueMs: Double
+    let totalPipelineLatencyMs: Double
+}
+
+private func ms(from ns: UInt64) -> Double {
+    return Double(ns) / 1_000_000.0
+}
+
+private func latestAlvrStatistics() -> AlvrClientStatisticsSnapshot? {
+    var stats = AlvrClientStatisticsC()
+    guard alvr_get_last_client_statistics(&stats) else {
+        return nil
+    }
+    return AlvrClientStatisticsSnapshot(
+        targetTimestampNs: stats.target_timestamp_ns,
+        frameIntervalMs: ms(from: stats.frame_interval_ns),
+        videoDecodeMs: ms(from: stats.video_decode_ns),
+        videoDecoderQueueMs: ms(from: stats.video_decoder_queue_ns),
+        renderingMs: ms(from: stats.rendering_ns),
+        vsyncQueueMs: ms(from: stats.vsync_queue_ns),
+        totalPipelineLatencyMs: ms(from: stats.total_pipeline_latency_ns)
+    )
+}
+
 private struct GraphView: View {
     let samples: [Double]
     let lineColor: Color
@@ -63,6 +106,7 @@ private func streamFpsCap(from value: String) -> Double {
 
 private struct PerformanceOverlayContent: View {
     let snapshot: PerformanceTracker.Snapshot
+    let alvrStats: AlvrClientStatisticsSnapshot?
     let streamFpsCap: Double
 
     var body: some View {
@@ -71,7 +115,9 @@ private struct PerformanceOverlayContent: View {
         let decodeStats = snapshot.stats.decode
         let renderStats = snapshot.stats.render
         let gpuStats = snapshot.stats.gpu
-        let latestFrameMs = latest?.frameIntervalMs ?? 0
+        let trackerFrameMs = latest?.frameIntervalMs ?? 0
+        let alvrFrameMs = alvrStats?.frameIntervalMs ?? 0
+        let latestFrameMs = alvrFrameMs > 0 ? alvrFrameMs : trackerFrameMs
         let fps = latestFrameMs > 0 ? 1000.0 / latestFrameMs : 0
         let cappedFps = min(fps, streamFpsCap)
         let fpsRatio = streamFpsCap > 0 ? (cappedFps / streamFpsCap) : 0
@@ -88,7 +134,7 @@ private struct PerformanceOverlayContent: View {
                     Text("FPS")
                         .font(.system(size: 10, weight: .medium, design: .rounded))
                         .foregroundStyle(secondaryText)
-                    Text(latest != nil ? String(format: "%3.0f", min(cappedFps, 300)) : "--")
+                    Text(latest != nil || alvrFrameMs > 0 ? String(format: "%3.0f", min(cappedFps, 300)) : "--")
                         .font(.system(size: 16, weight: .bold, design: .rounded))
                         .foregroundStyle(fpsColor)
                         .monospacedDigit()
@@ -103,7 +149,7 @@ private struct PerformanceOverlayContent: View {
                         .font(.system(size: 10, weight: .medium, design: .rounded))
                         .foregroundStyle(secondaryText)
                     HStack(spacing: 4) {
-                        Text(latest != nil ? String(format: "%.1f", latestFrameMs) : "--")
+                        Text(latest != nil || alvrFrameMs > 0 ? String(format: "%.1f", latestFrameMs) : "--")
                             .font(.system(size: 16, weight: .bold, design: .rounded))
                             .foregroundStyle(frameColor)
                         Text("ms")
@@ -117,6 +163,28 @@ private struct PerformanceOverlayContent: View {
             .foregroundStyle(primaryText)
             
             VStack(alignment: .leading, spacing: 6) {
+                if let alvrStats {
+                    MetricRow(label: "pipeline", value: String(format: "%.2fms", alvrStats.totalPipelineLatencyMs))
+                        .font(.system(size: 10, weight: .regular, design: .monospaced))
+                        .foregroundStyle(secondaryText)
+                    MetricRow(label: "decode", value: String(format: "%.2fms", alvrStats.videoDecodeMs))
+                        .font(.system(size: 10, weight: .regular, design: .monospaced))
+                        .foregroundStyle(secondaryText)
+                    MetricRow(label: "decoder q", value: String(format: "%.2fms", alvrStats.videoDecoderQueueMs))
+                        .font(.system(size: 10, weight: .regular, design: .monospaced))
+                        .foregroundStyle(secondaryText)
+                    MetricRow(label: "render", value: String(format: "%.2fms", alvrStats.renderingMs))
+                        .font(.system(size: 10, weight: .regular, design: .monospaced))
+                        .foregroundStyle(secondaryText)
+                    MetricRow(label: "vsync q", value: String(format: "%.2fms", alvrStats.vsyncQueueMs))
+                        .font(.system(size: 10, weight: .regular, design: .monospaced))
+                        .foregroundStyle(secondaryText)
+                } else {
+                    MetricRow(label: "alvr stats", value: "--")
+                        .font(.system(size: 10, weight: .regular, design: .monospaced))
+                        .foregroundStyle(secondaryText)
+                }
+
                 GraphView(samples: snapshot.frameTimes, lineColor: .green, referenceLines: [11.11])
                     .frame(height: 32)
                 MetricRow(label: "frame avg", value: String(format: "%.2fms", frameStats.avg))
@@ -157,8 +225,10 @@ struct PerformanceOverlayPanel: View {
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1.0 / 30.0)) { _ in
             let snapshot = PerformanceTracker.shared.snapshot()
+            let alvrStats = latestAlvrStatistics()
             PerformanceOverlayContent(
                 snapshot: snapshot,
+                alvrStats: alvrStats,
                 streamFpsCap: streamFpsCap(from: gStore.settings.streamFPS)
             )
         }
@@ -167,11 +237,13 @@ struct PerformanceOverlayPanel: View {
 
 struct PerformanceOverlaySnapshotView: View {
     let snapshot: PerformanceTracker.Snapshot
+    let alvrStats: AlvrClientStatisticsSnapshot?
     let streamFpsCap: Double
 
     var body: some View {
         PerformanceOverlayContent(
             snapshot: snapshot,
+            alvrStats: alvrStats,
             streamFpsCap: streamFpsCap
         )
     }
@@ -253,11 +325,12 @@ final class PerformanceHudRenderer {
         }
         if shouldUpdate {
             let snapshot = PerformanceTracker.shared.snapshot()
+            let alvrStats = latestAlvrStatistics()
             let fpsCap = streamFpsCap(from: ALVRClientApp.gStore.settings.streamFPS)
             queue.async { [weak self] in
                 guard let self else { return }
                 DispatchQueue.main.async {
-                    let view = PerformanceOverlaySnapshotView(snapshot: snapshot, streamFpsCap: fpsCap)
+                    let view = PerformanceOverlaySnapshotView(snapshot: snapshot, alvrStats: alvrStats, streamFpsCap: fpsCap)
                     let renderer = ImageRenderer(content: view)
                     renderer.proposedSize = ProposedViewSize(width: 240, height: 250)
                     renderer.scale = 2
