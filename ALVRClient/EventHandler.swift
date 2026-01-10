@@ -198,8 +198,6 @@ class EventHandler: ObservableObject {
                 let capabilities = AlvrClientCapabilities(
                     default_view_width: defaultViewWidth,
                     default_view_height: defaultViewHeight,
-                    max_view_width: defaultViewWidth,
-                    max_view_height: defaultViewHeight,
                     refresh_rates: buffer.baseAddress,
                     refresh_rates_count: UInt64(buffer.count),
                     foveated_encoding: true,
@@ -207,6 +205,7 @@ class EventHandler: ObservableObject {
                     encoder_10_bits: true,
                     encoder_av1: VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1),
                     prefer_10bit: true,
+                    prefer_full_range: true,
                     preferred_encoding_gamma: 1.5,
                     prefer_hdr: false
                 )
@@ -523,7 +522,7 @@ class EventHandler: ObservableObject {
         
         let startedDecodeTime = CACurrentMediaTime()
         
-        if currentCodec == ALVR_CODEC_TYPE_AV1.rawValue && !av1InstantiatedForReal {
+        if currentCodec == ALVR_CODEC_AV1.rawValue && !av1InstantiatedForReal {
             print("Creating AV1 codec for real now.")
             let (attemptVtDecompressionSession, attemptVideoFormat) = VideoHandler.createVideoDecoder(initialNals: nal, codec: currentCodec)
             if attemptVtDecompressionSession != nil && attemptVideoFormat != nil {

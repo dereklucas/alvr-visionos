@@ -568,8 +568,8 @@ class WorldTracker {
                         print("Error during accessory initialization: \(error)")
                     }
                     if detectedPsvr {
-                        alvr_send_active_interaction_profile(WorldTracker.deviceIdLeftHand, WorldTracker.psvrInteractionProfile, nil, 0)
-                        alvr_send_active_interaction_profile(WorldTracker.deviceIdRightHand, WorldTracker.psvrInteractionProfile, nil, 0)
+                        alvr_send_active_interaction_profile(WorldTracker.deviceIdLeftHand, WorldTracker.psvrInteractionProfile)
+                        alvr_send_active_interaction_profile(WorldTracker.deviceIdRightHand, WorldTracker.psvrInteractionProfile)
                     }
                 }
                 for stylus in GCStylus.styli {
@@ -3002,17 +3002,7 @@ class WorldTracker {
         }
 
         EventHandler.shared.outgoingWorker.enqueue {
-            let handSkeletons: [UnsafePointer<AlvrPose>?] = [
-                skeletonLeftPtr.map { UnsafePointer($0) },
-                skeletonRightPtr.map { UnsafePointer($0) }
-            ]
-            alvr_send_tracking(
-                reportedTargetTimestampNS,
-                trackingMotions,
-                UInt64(trackingMotions.count),
-                handSkeletons,
-                nil
-            )
+            alvr_send_tracking_and_face_data(reportedTargetTimestampNS, trackingMotions, UInt64(trackingMotions.count), [UnsafePointer(skeletonLeftPtr), UnsafePointer(skeletonRightPtr)], [UnsafePointer(eyeGazeLeftPtr), UnsafePointer(eyeGazeRightPtr)], UnsafePointer(fbFaceExpressions))
 
             if self.needsRecenterTrigger {
                 // TODO raycast to the nearest wall/TV
