@@ -33,6 +33,67 @@ private func ms(from ns: UInt64) -> Double {
     return Double(ns) / 1_000_000.0
 }
 
+private func averageMs(_ values: [Double]) -> Double {
+    let filtered = values.filter { $0 > 0 }
+    guard !filtered.isEmpty else { return 0 }
+    return filtered.reduce(0, +) / Double(filtered.count)
+}
+
+private struct AlvrStatsSeriesSnapshot {
+    let frameTimes: [Double]
+    let pipelineTimes: [Double]
+    let decodeTimes: [Double]
+    let renderTimes: [Double]
+    let vsyncQueueTimes: [Double]
+    let decoderQueueTimes: [Double]
+    let latest: AlvrClientStatisticsSnapshot?
+}
+
+private final class AlvrStatsTracker {
+    static let shared = AlvrStatsTracker()
+
+    private let lock = OSAllocatedUnfairLock()
+    private var ring: [AlvrClientStatisticsSnapshot?] = Array(repeating: nil, count: 60)
+    private var ringIndex = 0
+    private var lastTargetTimestampNs: UInt64 = 0
+
+    private init() {}
+
+    func recordIfNew(_ stats: AlvrClientStatisticsSnapshot) {
+        guard stats.targetTimestampNs != 0 else { return }
+        lock.withLock {
+            if stats.targetTimestampNs == lastTargetTimestampNs {
+                return
+            }
+            lastTargetTimestampNs = stats.targetTimestampNs
+            ring[ringIndex] = stats
+            ringIndex = (ringIndex + 1) % ring.count
+        }
+    }
+
+    func snapshot() -> AlvrStatsSeriesSnapshot {
+        lock.withLock {
+            var ordered: [AlvrClientStatisticsSnapshot] = []
+            ordered.reserveCapacity(ring.count)
+            for offset in 0..<ring.count {
+                let idx = (ringIndex + offset) % ring.count
+                if let sample = ring[idx] {
+                    ordered.append(sample)
+                }
+            }
+            return AlvrStatsSeriesSnapshot(
+                frameTimes: ordered.map { $0.frameIntervalMs },
+                pipelineTimes: ordered.map { $0.totalPipelineLatencyMs },
+                decodeTimes: ordered.map { $0.videoDecodeMs },
+                renderTimes: ordered.map { $0.renderingMs },
+                vsyncQueueTimes: ordered.map { $0.vsyncQueueMs },
+                decoderQueueTimes: ordered.map { $0.videoDecoderQueueMs },
+                latest: ordered.last
+            )
+        }
+    }
+}
+
 private func latestAlvrStatistics() -> AlvrClientStatisticsSnapshot? {
     var stats = AlvrClientStatisticsC()
     guard alvr_get_last_client_statistics(&stats) else {
@@ -106,17 +167,15 @@ private func streamFpsCap(from value: String) -> Double {
 
 private struct PerformanceOverlayContent: View {
     let snapshot: PerformanceTracker.Snapshot
-    let alvrStats: AlvrClientStatisticsSnapshot?
+    let alvrSeries: AlvrStatsSeriesSnapshot
     let streamFpsCap: Double
 
     var body: some View {
         let latest = snapshot.latest
-        let frameStats = snapshot.stats.frame
-        let decodeStats = snapshot.stats.decode
-        let renderStats = snapshot.stats.render
+        let alvrLatest = alvrSeries.latest
         let gpuStats = snapshot.stats.gpu
         let trackerFrameMs = latest?.frameIntervalMs ?? 0
-        let alvrFrameMs = alvrStats?.frameIntervalMs ?? 0
+        let alvrFrameMs = alvrLatest?.frameIntervalMs ?? 0
         let latestFrameMs = alvrFrameMs > 0 ? alvrFrameMs : trackerFrameMs
         let fps = latestFrameMs > 0 ? 1000.0 / latestFrameMs : 0
         let cappedFps = min(fps, streamFpsCap)
@@ -163,20 +222,20 @@ private struct PerformanceOverlayContent: View {
             .foregroundStyle(primaryText)
             
             VStack(alignment: .leading, spacing: 6) {
-                if let alvrStats {
-                    MetricRow(label: "pipeline", value: String(format: "%.2fms", alvrStats.totalPipelineLatencyMs))
+                if let alvrLatest {
+                    MetricRow(label: "pipeline (m2p)", value: String(format: "%.2fms", alvrLatest.totalPipelineLatencyMs))
                         .font(.system(size: 10, weight: .regular, design: .monospaced))
                         .foregroundStyle(secondaryText)
-                    MetricRow(label: "decode", value: String(format: "%.2fms", alvrStats.videoDecodeMs))
+                    MetricRow(label: "decode", value: String(format: "%.2fms", alvrLatest.videoDecodeMs))
                         .font(.system(size: 10, weight: .regular, design: .monospaced))
                         .foregroundStyle(secondaryText)
-                    MetricRow(label: "decoder q", value: String(format: "%.2fms", alvrStats.videoDecoderQueueMs))
+                    MetricRow(label: "decoder q", value: String(format: "%.2fms", alvrLatest.videoDecoderQueueMs))
                         .font(.system(size: 10, weight: .regular, design: .monospaced))
                         .foregroundStyle(secondaryText)
-                    MetricRow(label: "render", value: String(format: "%.2fms", alvrStats.renderingMs))
+                    MetricRow(label: "render", value: String(format: "%.2fms", alvrLatest.renderingMs))
                         .font(.system(size: 10, weight: .regular, design: .monospaced))
                         .foregroundStyle(secondaryText)
-                    MetricRow(label: "vsync q", value: String(format: "%.2fms", alvrStats.vsyncQueueMs))
+                    MetricRow(label: "vsync q", value: String(format: "%.2fms", alvrLatest.vsyncQueueMs))
                         .font(.system(size: 10, weight: .regular, design: .monospaced))
                         .foregroundStyle(secondaryText)
                 } else {
@@ -185,25 +244,31 @@ private struct PerformanceOverlayContent: View {
                         .foregroundStyle(secondaryText)
                 }
 
-                GraphView(samples: snapshot.frameTimes, lineColor: .green, referenceLines: [11.11])
+                GraphView(samples: alvrSeries.frameTimes, lineColor: .green, referenceLines: [frameTargetMs])
                     .frame(height: 32)
-                MetricRow(label: "frame avg", value: String(format: "%.2fms", frameStats.avg))
+                MetricRow(label: "frame avg", value: String(format: "%.2fms", averageMs(alvrSeries.frameTimes)))
                     .font(.system(size: 10, weight: .regular, design: .monospaced))
                     .foregroundStyle(secondaryText)
 
-                GraphView(samples: snapshot.decodeTimes, lineColor: .yellow, referenceLines: [11.11])
+                GraphView(samples: alvrSeries.pipelineTimes, lineColor: .teal, referenceLines: [])
                     .frame(height: 32)
-                MetricRow(label: "decode", value: String(format: "%.2fms", decodeStats.avg))
+                MetricRow(label: "pipeline", value: String(format: "%.2fms", averageMs(alvrSeries.pipelineTimes)))
                     .font(.system(size: 10, weight: .regular, design: .monospaced))
                     .foregroundStyle(secondaryText)
 
-                GraphView(samples: snapshot.renderTimes, lineColor: .orange, referenceLines: [11.11])
+                GraphView(samples: alvrSeries.decodeTimes, lineColor: .yellow, referenceLines: [])
                     .frame(height: 32)
-                MetricRow(label: "render", value: String(format: "%.2fms", renderStats.avg))
+                MetricRow(label: "decode", value: String(format: "%.2fms", averageMs(alvrSeries.decodeTimes)))
                     .font(.system(size: 10, weight: .regular, design: .monospaced))
                     .foregroundStyle(secondaryText)
 
-                GraphView(samples: snapshot.gpuTimes, lineColor: .pink, referenceLines: [11.11])
+                GraphView(samples: alvrSeries.renderTimes, lineColor: .orange, referenceLines: [])
+                    .frame(height: 32)
+                MetricRow(label: "render", value: String(format: "%.2fms", averageMs(alvrSeries.renderTimes)))
+                    .font(.system(size: 10, weight: .regular, design: .monospaced))
+                    .foregroundStyle(secondaryText)
+
+                GraphView(samples: snapshot.gpuTimes, lineColor: .pink, referenceLines: [])
                     .frame(height: 32)
                 MetricRow(label: "gpu", value: String(format: "%.2fms", gpuStats.avg))
                     .font(.system(size: 10, weight: .regular, design: .monospaced))
@@ -225,10 +290,15 @@ private struct PerformanceOverlayPanel: View {
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1.0 / 30.0)) { _ in
             let snapshot = PerformanceTracker.shared.snapshot()
-            let alvrStats = latestAlvrStatistics()
+            let alvrSeries: AlvrStatsSeriesSnapshot = {
+                if let alvrStats = latestAlvrStatistics() {
+                    AlvrStatsTracker.shared.recordIfNew(alvrStats)
+                }
+                return AlvrStatsTracker.shared.snapshot()
+            }()
             PerformanceOverlayContent(
                 snapshot: snapshot,
-                alvrStats: alvrStats,
+                alvrSeries: alvrSeries,
                 streamFpsCap: streamFpsCap(from: gStore.settings.streamFPS)
             )
         }
@@ -237,13 +307,13 @@ private struct PerformanceOverlayPanel: View {
 
 private struct PerformanceOverlaySnapshotView: View {
     let snapshot: PerformanceTracker.Snapshot
-    let alvrStats: AlvrClientStatisticsSnapshot?
+    let alvrSeries: AlvrStatsSeriesSnapshot
     let streamFpsCap: Double
 
     var body: some View {
         PerformanceOverlayContent(
             snapshot: snapshot,
-            alvrStats: alvrStats,
+            alvrSeries: alvrSeries,
             streamFpsCap: streamFpsCap
         )
     }
@@ -325,14 +395,17 @@ final class PerformanceHudRenderer {
         }
         if shouldUpdate {
             let snapshot = PerformanceTracker.shared.snapshot()
-            let alvrStats = latestAlvrStatistics()
+            if let alvrStats = latestAlvrStatistics() {
+                AlvrStatsTracker.shared.recordIfNew(alvrStats)
+            }
+            let alvrSeries = AlvrStatsTracker.shared.snapshot()
             let fpsCap = streamFpsCap(from: ALVRClientApp.gStore.settings.streamFPS)
             queue.async { [weak self] in
                 guard let self else { return }
                 DispatchQueue.main.async {
-                    let view = PerformanceOverlaySnapshotView(snapshot: snapshot, alvrStats: alvrStats, streamFpsCap: fpsCap)
+                    let view = PerformanceOverlaySnapshotView(snapshot: snapshot, alvrSeries: alvrSeries, streamFpsCap: fpsCap)
                     let renderer = ImageRenderer(content: view)
-                    renderer.proposedSize = ProposedViewSize(width: 240, height: 250)
+                    renderer.proposedSize = ProposedViewSize(width: 240, height: 300)
                     renderer.scale = 2
                     renderer.isOpaque = false
                     guard let cgImage = renderer.cgImage else {
