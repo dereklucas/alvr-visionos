@@ -39,6 +39,14 @@ private func averageMs(_ values: [Double]) -> Double {
     return filtered.reduce(0, +) / Double(filtered.count)
 }
 
+private func tailSeries(_ values: [Double], count: Int) -> [Double] {
+    guard count > 0 else { return [] }
+    if values.count <= count {
+        return values
+    }
+    return Array(values.suffix(count))
+}
+
 private struct AlvrStatsSeriesSnapshot {
     let frameTimes: [Double]
     let pipelineTimes: [Double]
@@ -173,7 +181,6 @@ private struct PerformanceOverlayContent: View {
     var body: some View {
         let latest = snapshot.latest
         let alvrLatest = alvrSeries.latest
-        let gpuStats = snapshot.stats.gpu
         let trackerFrameMs = latest?.frameIntervalMs ?? 0
         let alvrFrameMs = alvrLatest?.frameIntervalMs ?? 0
         let latestFrameMs = alvrFrameMs > 0 ? alvrFrameMs : trackerFrameMs
@@ -186,6 +193,8 @@ private struct PerformanceOverlayContent: View {
         let frameColor: Color = frameRatio >= 0.95 ? .green : (frameRatio >= 0.8 ? .yellow : .red)
         let primaryText = Color.white
         let secondaryText = Color.white.opacity(0.7)
+        let gpuSeriesCount = alvrSeries.frameTimes.isEmpty ? snapshot.gpuTimes.count : alvrSeries.frameTimes.count
+        let gpuSeries = tailSeries(snapshot.gpuTimes, count: gpuSeriesCount)
 
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
@@ -222,17 +231,53 @@ private struct PerformanceOverlayContent: View {
             .foregroundStyle(primaryText)
             
             VStack(alignment: .leading, spacing: 6) {
+                Text("FRAME")
+                    .font(.system(size: 9, weight: .semibold, design: .rounded))
+                    .foregroundStyle(secondaryText)
+                GraphView(samples: alvrSeries.frameTimes, lineColor: .green, referenceLines: [frameTargetMs])
+                    .frame(height: 32)
+                MetricRow(label: "frame avg", value: String(format: "%.2fms", averageMs(alvrSeries.frameTimes)))
+                    .font(.system(size: 10, weight: .regular, design: .monospaced))
+                    .foregroundStyle(secondaryText)
+
+                Text("PIPELINE")
+                    .font(.system(size: 9, weight: .semibold, design: .rounded))
+                    .foregroundStyle(secondaryText)
+                GraphView(samples: alvrSeries.pipelineTimes, lineColor: .teal, referenceLines: [frameTargetMs])
+                    .frame(height: 32)
+                MetricRow(label: "pipeline", value: String(format: "%.2fms", averageMs(alvrSeries.pipelineTimes)))
+                    .font(.system(size: 10, weight: .regular, design: .monospaced))
+                    .foregroundStyle(secondaryText)
+
+                Text("DECODE")
+                    .font(.system(size: 9, weight: .semibold, design: .rounded))
+                    .foregroundStyle(secondaryText)
+                GraphView(samples: alvrSeries.decodeTimes, lineColor: .yellow, referenceLines: [frameTargetMs])
+                    .frame(height: 32)
+                MetricRow(label: "decode", value: String(format: "%.2fms", averageMs(alvrSeries.decodeTimes)))
+                    .font(.system(size: 10, weight: .regular, design: .monospaced))
+                    .foregroundStyle(secondaryText)
+
+                Text("RENDER")
+                    .font(.system(size: 9, weight: .semibold, design: .rounded))
+                    .foregroundStyle(secondaryText)
+                GraphView(samples: alvrSeries.renderTimes, lineColor: .orange, referenceLines: [frameTargetMs])
+                    .frame(height: 32)
+                MetricRow(label: "render", value: String(format: "%.2fms", averageMs(alvrSeries.renderTimes)))
+                    .font(.system(size: 10, weight: .regular, design: .monospaced))
+                    .foregroundStyle(secondaryText)
+
+                Text("GPU")
+                    .font(.system(size: 9, weight: .semibold, design: .rounded))
+                    .foregroundStyle(secondaryText)
+                GraphView(samples: gpuSeries, lineColor: .pink, referenceLines: [frameTargetMs])
+                    .frame(height: 32)
+                MetricRow(label: "gpu", value: String(format: "%.2fms", averageMs(gpuSeries)))
+                    .font(.system(size: 10, weight: .regular, design: .monospaced))
+                    .foregroundStyle(secondaryText)
+
                 if let alvrLatest {
-                    MetricRow(label: "pipeline (m2p)", value: String(format: "%.2fms", alvrLatest.totalPipelineLatencyMs))
-                        .font(.system(size: 10, weight: .regular, design: .monospaced))
-                        .foregroundStyle(secondaryText)
-                    MetricRow(label: "decode", value: String(format: "%.2fms", alvrLatest.videoDecodeMs))
-                        .font(.system(size: 10, weight: .regular, design: .monospaced))
-                        .foregroundStyle(secondaryText)
                     MetricRow(label: "decoder q", value: String(format: "%.2fms", alvrLatest.videoDecoderQueueMs))
-                        .font(.system(size: 10, weight: .regular, design: .monospaced))
-                        .foregroundStyle(secondaryText)
-                    MetricRow(label: "render", value: String(format: "%.2fms", alvrLatest.renderingMs))
                         .font(.system(size: 10, weight: .regular, design: .monospaced))
                         .foregroundStyle(secondaryText)
                     MetricRow(label: "vsync q", value: String(format: "%.2fms", alvrLatest.vsyncQueueMs))
@@ -243,36 +288,6 @@ private struct PerformanceOverlayContent: View {
                         .font(.system(size: 10, weight: .regular, design: .monospaced))
                         .foregroundStyle(secondaryText)
                 }
-
-                GraphView(samples: alvrSeries.frameTimes, lineColor: .green, referenceLines: [frameTargetMs])
-                    .frame(height: 32)
-                MetricRow(label: "frame avg", value: String(format: "%.2fms", averageMs(alvrSeries.frameTimes)))
-                    .font(.system(size: 10, weight: .regular, design: .monospaced))
-                    .foregroundStyle(secondaryText)
-
-                GraphView(samples: alvrSeries.pipelineTimes, lineColor: .teal, referenceLines: [])
-                    .frame(height: 32)
-                MetricRow(label: "pipeline", value: String(format: "%.2fms", averageMs(alvrSeries.pipelineTimes)))
-                    .font(.system(size: 10, weight: .regular, design: .monospaced))
-                    .foregroundStyle(secondaryText)
-
-                GraphView(samples: alvrSeries.decodeTimes, lineColor: .yellow, referenceLines: [])
-                    .frame(height: 32)
-                MetricRow(label: "decode", value: String(format: "%.2fms", averageMs(alvrSeries.decodeTimes)))
-                    .font(.system(size: 10, weight: .regular, design: .monospaced))
-                    .foregroundStyle(secondaryText)
-
-                GraphView(samples: alvrSeries.renderTimes, lineColor: .orange, referenceLines: [])
-                    .frame(height: 32)
-                MetricRow(label: "render", value: String(format: "%.2fms", averageMs(alvrSeries.renderTimes)))
-                    .font(.system(size: 10, weight: .regular, design: .monospaced))
-                    .foregroundStyle(secondaryText)
-
-                GraphView(samples: snapshot.gpuTimes, lineColor: .pink, referenceLines: [])
-                    .frame(height: 32)
-                MetricRow(label: "gpu", value: String(format: "%.2fms", gpuStats.avg))
-                    .font(.system(size: 10, weight: .regular, design: .monospaced))
-                    .foregroundStyle(secondaryText)
             }
         }
         .padding(8)
