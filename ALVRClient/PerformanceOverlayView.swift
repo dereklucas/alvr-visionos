@@ -220,7 +220,7 @@ private struct PerformanceOverlayContent: View {
     }
 }
 
-struct PerformanceOverlayPanel: View {
+private struct PerformanceOverlayPanel: View {
     @EnvironmentObject private var gStore: GlobalSettingsStore
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1.0 / 30.0)) { _ in
@@ -235,7 +235,7 @@ struct PerformanceOverlayPanel: View {
     }
 }
 
-struct PerformanceOverlaySnapshotView: View {
+private struct PerformanceOverlaySnapshotView: View {
     let snapshot: PerformanceTracker.Snapshot
     let alvrStats: AlvrClientStatisticsSnapshot?
     let streamFpsCap: Double
