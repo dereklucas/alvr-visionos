@@ -64,6 +64,20 @@ typedef struct
     matrix_float4x4 yuvTransform;
 } EncodingUniform;
 
+// Radial menu overlay uniforms
+typedef struct
+{
+    matrix_float4x4 modelMatrix;
+    float radius;
+    float innerRadius;
+    int segmentCount;
+    int hoveredSegment;
+    int selectedSegment;
+    float animationProgress;
+    float padding[2];  // Align to 16 bytes
+    simd_float4 segmentColors[8];  // Up to 8 segments
+} RadialMenuUniforms;
+
 #endif /* ShaderTypes_h */
 
 typedef NS_ENUM(EnumBackingType, ALVRFunctionConstant)

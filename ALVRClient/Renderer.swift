@@ -140,7 +140,10 @@ class Renderer {
     //else, we alpha blend them
     //playing with this variable will decide how much the foreground and background blend together
     var chromaKeyLerpDistRange = simd_float2(0.005, 0.1);
-    
+
+    // Mode-switch radial menu renderer
+    var radialMenuRenderer: RadialMenuRenderer?
+
     init(_ layerRenderer: LayerRenderer?) {
         self.layerRenderer = layerRenderer
         if layerRenderer == nil {
@@ -288,6 +291,21 @@ class Renderer {
                 depthFormat: layerRenderer?.configuration.depthFormat ?? renderDepthFormat,
                 viewCount: layerRenderer?.properties.viewCount ?? renderViewCount
         )
+
+        // Initialize radial menu renderer for mode-switch overlay
+        if let library = device.makeDefaultLibrary() {
+            do {
+                radialMenuRenderer = try RadialMenuRenderer(
+                    device: device,
+                    library: library,
+                    colorFormat: layerRenderer?.configuration.colorFormat ?? currentRenderColorFormat,
+                    depthFormat: layerRenderer?.configuration.depthFormat ?? renderDepthFormat,
+                    viewCount: layerRenderer?.properties.viewCount ?? renderViewCount
+                )
+            } catch {
+                print("[Renderer] Failed to create RadialMenuRenderer: \(error)")
+            }
+        }
     }
 
     // Vertex descriptor with float3 position and float2 UVs
@@ -1604,8 +1622,51 @@ class Renderer {
         if ALVRClientApp.gStore.settings.chaperoneDistanceCm > 0 || chaperoneSystem.hasActiveState {
             renderChaperone(commandBuffer: commandBuffer, renderTargetColor: renderTargetColor, renderTargetDepth: renderTargetDepth, viewports: viewports, rasterizationRateMap: rasterizationRateMap, simdDeviceAnchor: simdDeviceAnchor)
         }
+
+        // Render mode-switch radial menu overlay if visible
+        if ModeSwitchOverlay.shared.isVisible, let menuRenderer = radialMenuRenderer {
+            renderRadialMenu(commandBuffer: commandBuffer, renderTargetColor: renderTargetColor, renderTargetDepth: renderTargetDepth, viewports: viewports, rasterizationRateMap: rasterizationRateMap, menuRenderer: menuRenderer)
+        }
+
         if !isRealityKit {
             renderStreamingFrameDepth(commandBuffer: commandBuffer, renderTargetColor: renderTargetColor, renderTargetDepth: renderTargetDepth, viewports: viewports, viewTransforms: viewTransforms, sentViewTangents: sentViewTangents, realViewTangents: realViewTangents, nearZ: nearZ, farZ: farZ, rasterizationRateMap: rasterizationRateMap, queuedFrame: queuedFrame)
         }
+    }
+
+    // MARK: - Radial Menu Rendering
+
+    /// Render the mode-switch radial menu overlay
+    private func renderRadialMenu(commandBuffer: MTLCommandBuffer, renderTargetColor: MTLTexture, renderTargetDepth: MTLTexture, viewports: [MTLViewport], rasterizationRateMap: MTLRasterizationRateMap?, menuRenderer: RadialMenuRenderer) {
+        let renderPassDescriptor = MTLRenderPassDescriptor()
+        renderPassDescriptor.colorAttachments[0].texture = renderTargetColor
+        renderPassDescriptor.colorAttachments[0].loadAction = .load
+        renderPassDescriptor.colorAttachments[0].storeAction = .store
+        renderPassDescriptor.depthAttachment.texture = renderTargetDepth
+        renderPassDescriptor.depthAttachment.loadAction = .load
+        renderPassDescriptor.depthAttachment.storeAction = .store
+        renderPassDescriptor.renderTargetArrayLength = viewports.count
+
+        if let rasterizationRateMap = rasterizationRateMap {
+            renderPassDescriptor.rasterizationRateMap = rasterizationRateMap
+        }
+
+        guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
+            return
+        }
+
+        renderEncoder.label = "RadialMenuEncoder"
+        renderEncoder.setViewports(viewports)
+        renderEncoder.setDepthStencilState(depthStateGreater)
+        renderEncoder.setCullMode(.none)
+
+        menuRenderer.render(
+            encoder: renderEncoder,
+            overlay: ModeSwitchOverlay.shared,
+            viewUniforms: dynamicUniformBuffer,
+            currentTime: CACurrentMediaTime(),
+            viewports: viewports
+        )
+
+        renderEncoder.endEncoding()
     }
 }

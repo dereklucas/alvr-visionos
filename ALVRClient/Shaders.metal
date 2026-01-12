@@ -405,9 +405,211 @@ fragment half4 copyFragmentShader(CopyVertexOut in [[stage_in]], texture2d_array
                     address::clamp_to_edge,
                     filter::linear);
     ushort idx = in.position.z != 0.0 ? 1 : 0;
-    
+
     half4 color = in_tex.sample(colorSampler, in.uv, idx);
     //half4 color = half4(in.uv.x, in.uv.y, 0.0, 1.0);
+
+    return color;
+}
+
+// MARK: - Radial Menu Overlay Shaders
+
+struct RadialMenuVertexOut {
+    float4 position [[position]];
+    float2 localPos;      // Position relative to menu center (-1 to 1)
+    float segmentAngle;   // Angle of segment center
+    int segmentIndex;     // Which segment this vertex belongs to
+    float distanceFromCenter;  // Normalized distance from center (0-1)
+    uint renderTargetIndex [[render_target_array_index]];
+};
+
+// Generates radial menu geometry procedurally
+// Each segment is rendered as a pie slice using instancing
+vertex RadialMenuVertexOut radialMenuVertexShader(
+    uint vertexID [[vertex_id]],
+    uint instanceID [[instance_id]],
+    ushort amp_id [[amplification_id]],
+    constant RadialMenuUniforms& menuUniforms [[buffer(0)]],
+    constant UniformsArray& viewUniforms [[buffer(BufferIndexUniforms)]]
+) {
+    RadialMenuVertexOut out;
+    Uniforms uniforms = viewUniforms.uniforms[amp_id];
+
+    int segmentIndex = instanceID;
+    int segmentCount = menuUniforms.segmentCount;
+
+    // Each segment is a triangle fan with vertices:
+    // 0 = center, 1-N = outer edge points
+    // We'll generate smooth arcs with 16 triangles per segment
+    const int TRIS_PER_SEGMENT = 16;
+    const int VERTS_PER_SEGMENT = TRIS_PER_SEGMENT * 3;
+
+    int triIndex = vertexID / 3;
+    int vertexInTri = vertexID % 3;
+
+    float segmentAngle = 2.0 * M_PI_F / float(segmentCount);
+    float startAngle = float(segmentIndex) * segmentAngle - M_PI_F / 2.0;
+
+    // Calculate angle for this vertex within the segment
+    float triStartAngle = startAngle + (float(triIndex) / float(TRIS_PER_SEGMENT)) * segmentAngle;
+    float triEndAngle = startAngle + (float(triIndex + 1) / float(TRIS_PER_SEGMENT)) * segmentAngle;
+
+    float3 localPos;
+    float2 normPos;  // For fragment shader
+
+    if (vertexInTri == 0) {
+        // Center vertex (at inner radius for donut shape)
+        float midAngle = (triStartAngle + triEndAngle) / 2.0;
+        localPos = float3(
+            cos(midAngle) * menuUniforms.innerRadius,
+            0,
+            sin(midAngle) * menuUniforms.innerRadius
+        );
+        normPos = float2(cos(midAngle), sin(midAngle)) * (menuUniforms.innerRadius / menuUniforms.radius);
+    } else if (vertexInTri == 1) {
+        // First outer edge vertex
+        localPos = float3(
+            cos(triStartAngle) * menuUniforms.radius,
+            0,
+            sin(triStartAngle) * menuUniforms.radius
+        );
+        normPos = float2(cos(triStartAngle), sin(triStartAngle));
+    } else {
+        // Second outer edge vertex
+        localPos = float3(
+            cos(triEndAngle) * menuUniforms.radius,
+            0,
+            sin(triEndAngle) * menuUniforms.radius
+        );
+        normPos = float2(cos(triEndAngle), sin(triEndAngle));
+    }
+
+    // Transform to world space
+    float4 worldPos = menuUniforms.modelMatrix * float4(localPos, 1.0);
+
+    // Transform to clip space
+    out.position = uniforms.projectionMatrix * uniforms.modelViewMatrix * worldPos;
+    out.localPos = normPos;
+    out.segmentAngle = startAngle + segmentAngle / 2.0;
+    out.segmentIndex = segmentIndex;
+    out.distanceFromCenter = length(normPos);
+    out.renderTargetIndex = amp_id;
+
+    return out;
+}
+
+fragment float4 radialMenuFragmentShader(
+    RadialMenuVertexOut in [[stage_in]],
+    constant RadialMenuUniforms& menuUniforms [[buffer(0)]]
+) {
+    int segmentIndex = in.segmentIndex;
+
+    // Get base color for this segment
+    float4 baseColor = menuUniforms.segmentColors[segmentIndex % 8];
+
+    // Highlight hovered segment
+    if (segmentIndex == menuUniforms.hoveredSegment) {
+        baseColor = mix(baseColor, float4(1.0, 1.0, 1.0, 1.0), 0.4);
+    }
+
+    // Dim the selected/current segment slightly differently
+    if (segmentIndex == menuUniforms.selectedSegment) {
+        baseColor = mix(baseColor, float4(0.8, 0.8, 0.8, 1.0), 0.2);
+    }
+
+    // Calculate segment borders for visual separation
+    float segmentAngle = 2.0 * M_PI_F / float(menuUniforms.segmentCount);
+    float angle = atan2(in.localPos.y, in.localPos.x) + M_PI_F / 2.0;  // Offset to match vertex shader
+    if (angle < 0) angle += 2.0 * M_PI_F;
+
+    float angleInSegment = fmod(angle, segmentAngle);
+    float edgeDist = min(angleInSegment, segmentAngle - angleInSegment);
+
+    // Add subtle border between segments
+    float borderWidth = 0.03;
+    if (edgeDist < borderWidth) {
+        float borderAlpha = 1.0 - (edgeDist / borderWidth);
+        baseColor = mix(baseColor, float4(1.0, 1.0, 1.0, 0.8), borderAlpha * 0.5);
+    }
+
+    // Soft outer edge
+    float outerSoftness = smoothstep(1.0, 0.95, in.distanceFromCenter);
+
+    // Soft inner edge
+    float innerRatio = menuUniforms.innerRadius / menuUniforms.radius;
+    float innerSoftness = smoothstep(innerRatio, innerRatio + 0.05, in.distanceFromCenter);
+
+    // Apply edge softness
+    baseColor.a *= outerSoftness * innerSoftness;
+
+    // Apply animation progress (fade in/out)
+    baseColor.a *= menuUniforms.animationProgress;
+
+    // Discard fully transparent pixels
+    if (baseColor.a < 0.01) {
+        discard_fragment();
+    }
+
+    return baseColor;
+}
+
+// Center indicator shader - shows current selection in the middle
+vertex RadialMenuVertexOut radialMenuCenterVertexShader(
+    uint vertexID [[vertex_id]],
+    ushort amp_id [[amplification_id]],
+    constant RadialMenuUniforms& menuUniforms [[buffer(0)]],
+    constant UniformsArray& viewUniforms [[buffer(BufferIndexUniforms)]]
+) {
+    RadialMenuVertexOut out;
+    Uniforms uniforms = viewUniforms.uniforms[amp_id];
+
+    // Generate a small circle in the center
+    const int NUM_SEGMENTS = 32;
+    int triIndex = vertexID / 3;
+    int vertexInTri = vertexID % 3;
+
+    float angle1 = float(triIndex) / float(NUM_SEGMENTS) * 2.0 * M_PI_F;
+    float angle2 = float(triIndex + 1) / float(NUM_SEGMENTS) * 2.0 * M_PI_F;
+
+    float centerRadius = menuUniforms.innerRadius * 0.7;
+    float3 localPos;
+
+    if (vertexInTri == 0) {
+        localPos = float3(0, 0, 0);
+    } else if (vertexInTri == 1) {
+        localPos = float3(cos(angle1) * centerRadius, 0, sin(angle1) * centerRadius);
+    } else {
+        localPos = float3(cos(angle2) * centerRadius, 0, sin(angle2) * centerRadius);
+    }
+
+    float4 worldPos = menuUniforms.modelMatrix * float4(localPos, 1.0);
+    out.position = uniforms.projectionMatrix * uniforms.modelViewMatrix * worldPos;
+    out.localPos = float2(localPos.x, localPos.z) / centerRadius;
+    out.segmentAngle = 0;
+    out.segmentIndex = -1;
+    out.distanceFromCenter = length(out.localPos);
+    out.renderTargetIndex = amp_id;
+
+    return out;
+}
+
+fragment float4 radialMenuCenterFragmentShader(
+    RadialMenuVertexOut in [[stage_in]],
+    constant RadialMenuUniforms& menuUniforms [[buffer(0)]]
+) {
+    // Dark semi-transparent center with soft edges
+    float4 color = float4(0.1, 0.1, 0.1, 0.7);
+
+    // Soft edge
+    float softness = smoothstep(1.0, 0.8, in.distanceFromCenter);
+    color.a *= softness;
+
+    // Apply animation
+    color.a *= menuUniforms.animationProgress;
+
+    if (color.a < 0.01) {
+        discard_fragment();
+    }
 
     return color;
 }

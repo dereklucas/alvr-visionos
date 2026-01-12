@@ -7,6 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		AA0001012F04040000000001 /* InputLayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0001002F04040000000001 /* InputLayer.swift */; };
+		AA0001032F04040000000002 /* ModeSwitchOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0001022F04040000000002 /* ModeSwitchOverlay.swift */; };
+		AA0001052F04040000000003 /* RadialMenuRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0001042F04040000000003 /* RadialMenuRenderer.swift */; };
 		656A9FCF2F04031600D8DE2D /* ChaperoneSystem.swift in Sources */ = {isa = PBXBuildFile; fileRef = 656A9FCE2F04031600D8DE2D /* ChaperoneSystem.swift */; };
 		8E1240FF2B7CC02E005B75F2 /* Entry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E1240FE2B7CC02E005B75F2 /* Entry.swift */; };
 		8E1241032B7CC0E1005B75F2 /* EntryControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E1241022B7CC0E1005B75F2 /* EntryControls.swift */; };
@@ -83,6 +86,9 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		AA0001002F04040000000001 /* InputLayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InputLayer.swift; sourceTree = "<group>"; };
+		AA0001022F04040000000002 /* ModeSwitchOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModeSwitchOverlay.swift; sourceTree = "<group>"; };
+		AA0001042F04040000000003 /* RadialMenuRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RadialMenuRenderer.swift; sourceTree = "<group>"; };
 		656A9FCE2F04031600D8DE2D /* ChaperoneSystem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChaperoneSystem.swift; sourceTree = "<group>"; };
 		8E1240FE2B7CC02E005B75F2 /* Entry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Entry.swift; sourceTree = "<group>"; };
 		8E1241022B7CC0E1005B75F2 /* EntryControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EntryControls.swift; sourceTree = "<group>"; };
@@ -213,10 +219,13 @@
 				E77FDE572EC5D97F00B0ED4F /* CameraView.swift */,
 				D68FA8082B742F6F0052B7FF /* FFR.swift */,
 				E702FBDB2B899B8300EE75D0 /* GlobalSettings.swift */,
+				AA0001002F04040000000001 /* InputLayer.swift */,
 				E72683DA2BE73DD10065B78B /* MetalClientSystem.swift */,
+				AA0001022F04040000000002 /* ModeSwitchOverlay.swift */,
 				E7A98A9F2BE2EEEA003DF333 /* RealityKitClientSystem.swift */,
 				E7F222412BE2F03800D10191 /* RealityKitClientView.swift */,
 				E7D606022C1B5D37009E3343 /* RealityKitEyeTrackingSystem.swift */,
+				AA0001042F04040000000003 /* RadialMenuRenderer.swift */,
 				C5E590352B6379ED00328ED6 /* Renderer.swift */,
 				9ED257162B8062A1008DC22F /* Settings.swift */,
 				C5E590372B6379ED00328ED6 /* Shaders.metal */,
@@ -407,6 +416,9 @@
 				8E739C8B2B78990B0045ED16 /* ViewModel.swift in Sources */,
 				656A9FCF2F04031600D8DE2D /* ChaperoneSystem.swift in Sources */,
 				E78D482D2EBA7508000F77D7 /* AV1Parser.swift in Sources */,
+				AA0001012F04040000000001 /* InputLayer.swift in Sources */,
+				AA0001032F04040000000002 /* ModeSwitchOverlay.swift in Sources */,
+				AA0001052F04040000000003 /* RadialMenuRenderer.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

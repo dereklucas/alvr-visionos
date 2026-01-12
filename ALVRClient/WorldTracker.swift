@@ -443,7 +443,15 @@ class WorldTracker {
     var rightIsPinching = false
     var lastRightIsPinching = false
     var rightPinchTrigger: Float = 0.0
-    
+
+    // MARK: - Palm-up gesture detection for mode-switch overlay
+    var leftPalmUp = false
+    var rightPalmUp = false
+    var leftPalmNormal = simd_float3(0, 0, 0)
+    var rightPalmNormal = simd_float3(0, 0, 0)
+    var leftWristWorldPosition = simd_float3(0, 0, 0)
+    var rightWristWorldPosition = simd_float3(0, 0, 0)
+
     var lastPinchSentTime = 0.0
     var leftPinchEyeDelta = simd_float3()
     var rightPinchEyeDelta = simd_float3()
@@ -1076,7 +1084,94 @@ class WorldTracker {
         let pose = AlvrPose(orientation: AlvrQuat(x: orientation.vector.x, y: orientation.vector.y, z: orientation.vector.z, w: orientation.vector.w), position: (position.x, position.y, position.z))
         return pose
     }
-    
+
+    // MARK: - Palm-up gesture detection for mode-switch overlay
+
+    /// Detect if palm is facing upward and extract palm normal and wrist position
+    /// - Parameters:
+    ///   - hand: The hand anchor to analyze
+    ///   - threshold: Dot product threshold for palm-up detection (default 0.7 = ~45 degrees)
+    /// - Returns: Tuple of (isPalmUp, palmNormal in world space, wristPosition in world space)
+    func detectPalmUpGesture(_ hand: HandAnchor, threshold: Float = 0.7) -> (isPalmUp: Bool, palmNormal: simd_float3, wristPosition: simd_float3) {
+        guard let skeleton = hand.handSkeleton else {
+            return (false, simd_float3(0, 0, 0), simd_float3(0, 0, 0))
+        }
+
+        let wrist = skeleton.joint(.wrist)
+
+        // Get wrist transform in world space (Apple coordinate system)
+        let wristTransform = hand.originFromAnchorTransform * wrist.anchorFromJointTransform
+
+        // Extract wrist position in world space
+        let wristPosition = simd_float3(
+            wristTransform.columns.3.x,
+            wristTransform.columns.3.y,
+            wristTransform.columns.3.z
+        )
+
+        // Palm normal is the Y-axis of wrist transform (points out of palm)
+        // In Apple's coordinate system, positive Y is up
+        // For palm-up, we need the palm normal to point upward
+        var palmNormal = simd_normalize(simd_float3(
+            wristTransform.columns.1.x,
+            wristTransform.columns.1.y,
+            wristTransform.columns.1.z
+        ))
+
+        // Adjust for hand chirality - left and right hands have mirrored normals
+        if hand.chirality == .left {
+            // Left hand palm normal points in opposite direction
+            palmNormal = -palmNormal
+        }
+
+        // Check if palm is facing up (dot product with up vector)
+        let upVector = simd_float3(0, 1, 0)
+        let dotProduct = simd_dot(palmNormal, upVector)
+
+        let isPalmUp = dotProduct > threshold
+
+        return (isPalmUp, palmNormal, wristPosition)
+    }
+
+    /// Update the mode-switch overlay with current hand tracking data
+    /// - Parameters:
+    ///   - leftHand: Left hand anchor (optional)
+    ///   - rightHand: Right hand anchor (optional)
+    ///   - headPosition: Current head/device position in world space
+    func updateModeSwitchOverlay(leftHand: HandAnchor?, rightHand: HandAnchor?, headPosition: simd_float3) {
+        // Detect palm-up for left hand
+        if let left = leftHand, left.isTracked {
+            let (isPalmUp, palmNormal, wristPos) = detectPalmUpGesture(left)
+            leftPalmUp = isPalmUp
+            leftPalmNormal = palmNormal
+            leftWristWorldPosition = wristPos
+        } else {
+            leftPalmUp = false
+        }
+
+        // Detect palm-up for right hand
+        if let right = rightHand, right.isTracked {
+            let (isPalmUp, palmNormal, wristPos) = detectPalmUpGesture(right)
+            rightPalmUp = isPalmUp
+            rightPalmNormal = palmNormal
+            rightWristWorldPosition = wristPos
+        } else {
+            rightPalmUp = false
+        }
+
+        // Update the overlay state machine
+        ModeSwitchOverlay.shared.update(
+            leftPalmUp: leftPalmUp,
+            rightPalmUp: rightPalmUp,
+            leftWristPosition: leftWristWorldPosition,
+            rightWristPosition: rightWristWorldPosition,
+            leftPalmNormal: leftPalmNormal,
+            rightPalmNormal: rightPalmNormal,
+            headPosition: headPosition,
+            currentTime: CACurrentMediaTime()
+        )
+    }
+
     // Velocity-based exponential moving average filter, filters out the jitters
     // while keeping the hands responsive.
     func filterHandPose(_ lastPose: AlvrPose, _ pose: AlvrPose, _ strength: Float) -> AlvrPose {
@@ -2542,7 +2637,16 @@ class WorldTracker {
             handPoses = handTracking.latestAnchors
 #endif
         }
-        
+
+        // MARK: - Mode-switch overlay palm detection
+        // Get head position from device anchor for shifting box bounds check
+        let headPositionForOverlay = appleOriginFromAnchor.columns.3.asFloat3()
+        updateModeSwitchOverlay(
+            leftHand: handPoses.leftHand,
+            rightHand: handPoses.rightHand,
+            headPosition: headPositionForOverlay
+        )
+
         // Skeleton disabling for SteamVR input 2.0
         leftSkeletonDisableHysteresis -= 0.01
         if leftSkeletonDisableHysteresis <= 0.0 {
