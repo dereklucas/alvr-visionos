@@ -59,6 +59,16 @@ let unitVectorXYZVertices:[Float] = [0.0, 0.0, 0.0,
                                        0.5, 1,
                                        0, 0,
                                        0.5, 0]
+                                       
+let hudQuadVertices:[Float] = [-0.5, -0.5, 0.0,
+                               0.5, -0.5, 0.0,
+                               -0.5, 0.5, 0.0,
+                               0.5, 0.5, 0.0,
+                               0.0, 1.0,
+                               1.0, 1.0,
+                               0.0, 0.0,
+                               1.0, 0.0]
+let hudQuadTexcoordOffset = 12 * MemoryLayout<Float>.size
 
 func NonlinearToLinearRGB(_ color: simd_float3) -> simd_float3 {
     let DIV12: Float = 1.0 / 12.92;
@@ -100,6 +110,7 @@ class Renderer {
     var videoFrameDepthPipelineState: MTLRenderPipelineState!
     var fullscreenQuadBuffer:MTLBuffer!
     var unitVectorXYZBuffer:MTLBuffer!
+    var hudQuadBuffer: MTLBuffer!
     var encodingGamma: Float = 1.0
     var lastReconfigureTime: Double = 0.0
     
@@ -118,6 +129,12 @@ class Renderer {
     var roundTripRenderTime: Double = 0.0
     var lastRoundTripRenderTimestamp: Double = 0.0
     var currentYuvTransform: simd_float4x4 = matrix_identity_float4x4
+    
+    private var modeSwitchGestureStart: TimeInterval? = nil
+    private var modeSwitchActive = false
+    private var modeSwitchAlpha: Float = 0.0
+    private var modeSwitchSelection = 0
+    private let modeSwitchHoldThreshold: TimeInterval = 0.35
     
     // Was curious if it improved; it's still juddery.
     var useApplesReprojection = false
@@ -218,6 +235,10 @@ class Renderer {
         
         unitVectorXYZVertices.withUnsafeBytes {
             unitVectorXYZBuffer = device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
+        }
+        
+        hudQuadVertices.withUnsafeBytes {
+            hudQuadBuffer = device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
         }
         
         self.videoFrameDepthPipelineState = try! Renderer.buildRenderPipelineForVideoFrameDepthWithDevice(
@@ -516,6 +537,133 @@ class Renderer {
         planeUniformBufferIndex = (planeUniformBufferIndex + 1) % maxPlanesDrawn
         planeUniformBufferOffset = alignedPlaneUniformSize * planeUniformBufferIndex
         planeUniforms = UnsafeMutableRawPointer(dynamicPlaneUniformBuffer.contents() + planeUniformBufferOffset).bindMemory(to:PlaneUniform.self, capacity:1)
+    }
+    
+    private func updateModeSwitchState(now: TimeInterval) {
+        let leftPinching = WorldTracker.shared.leftIsPinching
+        let rightPinching = WorldTracker.shared.rightIsPinching
+        let bothPinching = leftPinching && rightPinching
+        
+        if bothPinching {
+            if modeSwitchGestureStart == nil {
+                modeSwitchGestureStart = now
+            }
+            if !modeSwitchActive, let start = modeSwitchGestureStart, now - start > modeSwitchHoldThreshold {
+                modeSwitchActive = true
+                modeSwitchSelection = WorldTracker.shared.controllersAreDisabledByClickTogether ? 0 : 1
+            }
+        } else {
+            if modeSwitchActive {
+                WorldTracker.shared.controllersAreDisabledByClickTogether = (modeSwitchSelection == 0)
+            }
+            modeSwitchActive = false
+            modeSwitchGestureStart = nil
+        }
+        
+        let targetAlpha: Float = modeSwitchActive ? 1.0 : 0.0
+        modeSwitchAlpha += (targetAlpha - modeSwitchAlpha) * 0.2
+        if modeSwitchAlpha < 0.001 {
+            modeSwitchAlpha = 0.0
+        }
+    }
+    
+    private func renderModeSwitchHUD(renderEncoder: MTLRenderCommandEncoder, simdDeviceAnchor: simd_float4x4) {
+        if modeSwitchAlpha <= 0.0 {
+            return
+        }
+        
+        let leftPinch = WorldTracker.shared.leftPinchCurrentPosition
+        let rightPinch = WorldTracker.shared.rightPinchCurrentPosition
+        let leftRayOrigin = WorldTracker.shared.leftSelectionRayOrigin
+        let rightRayOrigin = WorldTracker.shared.rightSelectionRayOrigin
+        
+        var anchor = leftPinch
+        if WorldTracker.shared.leftIsPinching && WorldTracker.shared.rightIsPinching {
+            anchor = (leftPinch + rightPinch) * 0.5
+        } else if leftPinch == simd_float3() && leftRayOrigin != simd_float3() {
+            anchor = leftRayOrigin
+        } else if rightPinch != simd_float3() {
+            anchor = rightPinch
+        } else if rightRayOrigin != simd_float3() {
+            anchor = rightRayOrigin
+        }
+        
+        if anchor.isUnsanitary() || anchor == simd_float3() {
+            return
+        }
+        
+        let headPos = simdDeviceAnchor.columns.3.asFloat3()
+        var toHead = headPos - anchor
+        if simd_length(toHead) < 0.001 {
+            return
+        }
+        toHead = simd_normalize(toHead)
+        
+        let look = simd_look(at: toHead)
+        let rotation = simd_float4x4(look)
+        let hudRight = rotation.columns.0.asFloat3()
+        let hudUp = rotation.columns.1.asFloat3()
+        
+        let pinchDelta = rightPinch - WorldTracker.shared.rightPinchStartPosition
+        let selectDeadzone: Float = 0.015
+        if !pinchDelta.isUnsanitary() && simd_length(pinchDelta) > selectDeadzone {
+            let selectX = simd_dot(pinchDelta, hudRight)
+            if abs(selectX) > selectDeadzone {
+                modeSwitchSelection = selectX < 0.0 ? 0 : 1
+            }
+        }
+        
+        let hudCenter = anchor + (toHead * 0.06) + (hudUp * 0.03)
+        let baseTransform = hudCenter.asFloat4x4() * rotation
+        
+        func scaleMatrix(_ scale: simd_float3) -> simd_float4x4 {
+            return simd_float4x4(simd_float4(scale.x, 0.0, 0.0, 0.0),
+                                 simd_float4(0.0, scale.y, 0.0, 0.0),
+                                 simd_float4(0.0, 0.0, scale.z, 0.0),
+                                 simd_float4(0.0, 0.0, 0.0, 1.0))
+        }
+        
+        let baseScale: Float = 0.09
+        let tileScale: Float = 0.035
+        let tileOffset: Float = 0.035
+        let highlightScale: Float = 0.043
+        
+        let baseColor = simd_float4(0.03, 0.04, 0.06, 0.65 * modeSwitchAlpha)
+        let leftColor = simd_float4(0.2, 0.85, 0.4, 0.9 * modeSwitchAlpha)
+        let rightColor = simd_float4(0.25, 0.55, 0.95, 0.9 * modeSwitchAlpha)
+        let highlightColor = simd_float4(0.95, 0.95, 0.98, 0.85 * modeSwitchAlpha)
+        
+        renderEncoder.setDepthStencilState(depthStateAlways)
+        renderEncoder.setVertexBuffer(hudQuadBuffer, offset: 0, index: VertexAttribute.position.rawValue)
+        renderEncoder.setVertexBuffer(hudQuadBuffer, offset: hudQuadTexcoordOffset, index: VertexAttribute.texcoord.rawValue)
+        renderEncoder.setTriangleFillMode(.fill)
+        
+        var firstBind = true
+        func drawQuad(_ transform: simd_float4x4, _ color: simd_float4) {
+            selectNextPlaneUniformBuffer()
+            planeUniforms[0].planeTransform = transform
+            planeUniforms[0].planeColor = color
+            planeUniforms[0].planeDoProximity = 0.0
+            if firstBind {
+                renderEncoder.setVertexBuffer(dynamicPlaneUniformBuffer, offset:planeUniformBufferOffset, index: BufferIndex.planeUniforms.rawValue)
+                firstBind = false
+            } else {
+                renderEncoder.setVertexBufferOffset(planeUniformBufferOffset, index: BufferIndex.planeUniforms.rawValue)
+            }
+            renderEncoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        }
+        
+        drawQuad(baseTransform * scaleMatrix(simd_float3(repeating: baseScale)), baseColor)
+        
+        let leftTransform = baseTransform * simd_float3(-tileOffset, 0.0, 0.001).asFloat4x4() * scaleMatrix(simd_float3(repeating: tileScale))
+        let rightTransform = baseTransform * simd_float3(tileOffset, 0.0, 0.001).asFloat4x4() * scaleMatrix(simd_float3(repeating: tileScale))
+        drawQuad(leftTransform, leftColor)
+        drawQuad(rightTransform, rightColor)
+        
+        let highlightOffset = modeSwitchSelection == 0 ? -tileOffset : tileOffset
+        let highlightTransform = baseTransform * simd_float3(highlightOffset, 0.0, 0.002).asFloat4x4()
+            * scaleMatrix(simd_float3(repeating: highlightScale))
+        drawQuad(highlightTransform, highlightColor)
     }
 
     // Writes FOV/tangents/etc information to the uniform buffer.
@@ -1323,6 +1471,8 @@ class Renderer {
         WorldTracker.shared.debuggableScales = []
         WorldTracker.shared.unlockDebuggables()
         
+        renderModeSwitchHUD(renderEncoder: renderEncoder, simdDeviceAnchor: simdDeviceAnchor)
+        
         renderEncoder.popDebugGroup()
         renderEncoder.endEncoding()
     }
@@ -1595,7 +1745,8 @@ class Renderer {
         
         self.updateGameStateForVideoFrame(whichIdx, drawable: drawable, viewTransforms: viewTransforms, sentViewTangents: sentViewTangents, realViewTangents: realViewTangents, nearZ: nearZ, farZ: farZ, framePose: framePose, simdDeviceAnchor: simdDeviceAnchor)
         
-        if fadeInOverlayAlpha > 0.0 || WorldTracker.shared.debuggableMats.count > 0 {
+        updateModeSwitchState(now: CACurrentMediaTime())
+        if fadeInOverlayAlpha > 0.0 || WorldTracker.shared.debuggableMats.count > 0 || modeSwitchAlpha > 0.0 {
             // Not super kosher--we need the depth to be correct for the video frame box, but we can't have the view
             // outside of the video frame box be 0.0 depth or it won't get rastered by the compositor at all.
             // So we re-render the frame depth.
