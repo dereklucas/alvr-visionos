@@ -12,6 +12,13 @@ import CoreHaptics
 import Spatial
 import RealityKit
 
+enum HandEmulationMode: Int {
+    case joystick = 0
+    case gripTrigger = 1
+    case hybrid = 2
+    case off = 3
+}
+
 enum XrFaceExpression2FB: Int {
     case browLowererL = 0
     case browLowererR = 1
@@ -292,6 +299,8 @@ class WorldTracker {
     var rightHapticsAmplitude: Float = 0.0
     var rightEngine: CHHapticEngine? = nil
     
+    var handEmulationMode: HandEmulationMode = .gripTrigger
+    
     // Controller click-together to toggle hand tracking
     var firstControllerClickTime = 0.0
     var secondControllerClickTime = 0.0
@@ -499,6 +508,9 @@ class WorldTracker {
         self.sceneReconstruction = sceneReconstruction
         self.planeDetection = planeDetection
         self.accessoryTracking = nil
+        if !ALVRClientApp.gStore.settings.emulatedPinchInteractions {
+            handEmulationMode = .off
+        }
         
         Task {
             await monitorARKitSessionEvents()
@@ -515,6 +527,16 @@ class WorldTracker {
         self.crownPressCount = 0
         self.sentPoses = 0
         self.controllersAreDisabledByClickTogether = false
+    }
+
+    func setHandEmulationMode(_ mode: HandEmulationMode) {
+        handEmulationMode = mode
+        let enableHands = mode != .off
+        ALVRClientApp.gStore.settings.emulatedPinchInteractions = enableHands
+        controllersAreDisabledByClickTogether = enableHands
+        leftPinchTrigger = 0.0
+        rightPinchTrigger = 0.0
+        bothPinchSystemButtonTime = 0.0
     }
     
     func initializeAr() async  {
@@ -1345,6 +1367,37 @@ class WorldTracker {
         let pose: AlvrPose = AlvrPose(q, convertApplePositionToSteamVR(appleOrigin + (appleDirection * -0.5) + pinchOffset + adjPosition))
         
         return AlvrDeviceMotion(device_id: device_id, pose: pose, linear_velocity: (0,0,0), angular_velocity: (0, 0, 0))
+    }
+
+    private func headPosition() -> simd_float3? {
+        guard let headPose = lastHeadPose else {
+            return nil
+        }
+        return simd_float3(headPose.position.0, headPose.position.1, headPose.position.2)
+    }
+
+    private func pinchToStickValue(_ chirality: HandAnchor.Chirality, sensitivity: Float) -> simd_float2? {
+        guard let headPos = headPosition() else {
+            return nil
+        }
+        let isLeft = chirality == .left
+        let anchor = isLeft ? leftPinchStartPosition : rightPinchStartPosition
+        let current = isLeft ? leftPinchCurrentPosition : rightPinchCurrentPosition
+        let delta = current - anchor
+        if delta.isUnsanitary() {
+            return nil
+        }
+        let toHead = headPos - anchor
+        if simd_length(toHead) < 0.001 {
+            return nil
+        }
+        let look = simd_look(at: simd_normalize(toHead))
+        let rotation = simd_float4x4(look)
+        let axisRight = rotation.columns.0.asFloat3()
+        let axisUp = rotation.columns.1.asFloat3()
+        let x = simd_dot(delta, axisRight) / sensitivity
+        let y = simd_dot(delta, axisUp) / sensitivity
+        return simd_float2(min(max(x, -1.0), 1.0), min(max(y, -1.0), 1.0))
     }
     
     func handAnchorToSkeleton(_ hand: HandAnchor) -> [AlvrPose]? {
@@ -2664,7 +2717,7 @@ class WorldTracker {
         }
         
         // MARK: - Emulated pinch interactions overwrite emulated controller motions
-        if ALVRClientApp.gStore.settings.emulatedPinchInteractions {
+        if handEmulationMode == .gripTrigger {
             // Menu press with two pinches
             // (have to override triggers to prevent screenshot send)
             var systemButton = WorldTracker.leftMenuClick
@@ -2808,6 +2861,69 @@ class WorldTracker {
                 }
                 else if rightPinchTrigger > 0.0 && systemIsRight {
                     alvr_send_button(systemButton, boolVal(false))
+                }
+            }
+        }
+        else if handEmulationMode == .joystick || handEmulationMode == .hybrid {
+            bothPinchSystemButtonTime = 0.0
+            leftPinchTrigger = 0.0
+            rightPinchTrigger = 0.0
+            
+            let stickSensitivity: Float = 0.035
+            let stickDeadzone: Float = 0.1
+            
+            func sendStick(_ chirality: HandAnchor.Chirality, isPinching: Bool) {
+                let stick = pinchToStickValue(chirality, sensitivity: stickSensitivity)
+                let inDeadzone = stick == nil || simd_length(stick!) < stickDeadzone || !isPinching
+                let value = inDeadzone ? simd_float2() : stick!
+                let length = simd_length(value)
+                let click = length > 0.9
+                if chirality == .left {
+                    alvr_send_button(WorldTracker.leftThumbstickX, scalarVal(value.x))
+                    alvr_send_button(WorldTracker.leftThumbstickY, scalarVal(value.y))
+                    alvr_send_button(WorldTracker.leftThumbstickTouched, boolVal(isPinching))
+                    alvr_send_button(WorldTracker.leftThumbstickClick, boolVal(click))
+                    alvr_send_button(WorldTracker.leftTriggerClick, boolVal(false))
+                    alvr_send_button(WorldTracker.leftTriggerValue, scalarVal(0.0))
+                }
+                else {
+                    alvr_send_button(WorldTracker.rightThumbstickX, scalarVal(value.x))
+                    alvr_send_button(WorldTracker.rightThumbstickY, scalarVal(value.y))
+                    alvr_send_button(WorldTracker.rightThumbstickTouched, boolVal(isPinching))
+                    alvr_send_button(WorldTracker.rightThumbstickClick, boolVal(click))
+                    alvr_send_button(WorldTracker.rightTriggerClick, boolVal(false))
+                    alvr_send_button(WorldTracker.rightTriggerValue, scalarVal(0.0))
+                }
+            }
+            
+            if handEmulationMode == .joystick {
+                sendStick(.left, isPinching: leftIsPinching)
+                sendStick(.right, isPinching: rightIsPinching)
+            }
+            else {
+                sendStick(.left, isPinching: leftIsPinching)
+                let deltaSinceLastPinch = Float(max(CACurrentMediaTime() - lastPinchSentTime, 0.011))
+                lastPinchSentTime = CACurrentMediaTime()
+                let pinchTriggerSpeed: Float = 0.15 * (deltaSinceLastPinch / 0.011)
+                if rightIsPinching {
+                    alvr_send_button(WorldTracker.rightTriggerClick, boolVal(rightPinchTrigger > 0.7))
+                    alvr_send_button(WorldTracker.rightTriggerValue, scalarVal(rightPinchTrigger))
+                    rightPinchTrigger += pinchTriggerSpeed
+                    if rightPinchTrigger > 1.0 {
+                        rightPinchTrigger = 1.0
+                    }
+                }
+                else if rightPinchTrigger > 0.0 {
+                    alvr_send_button(WorldTracker.rightTriggerClick, boolVal(rightPinchTrigger > 0.7))
+                    alvr_send_button(WorldTracker.rightTriggerValue, scalarVal(rightPinchTrigger))
+                    rightPinchTrigger -= pinchTriggerSpeed
+                    if rightPinchTrigger < 0.0 {
+                        rightPinchTrigger = 0.0
+                    }
+                }
+                else {
+                    alvr_send_button(WorldTracker.rightTriggerClick, boolVal(false))
+                    alvr_send_button(WorldTracker.rightTriggerValue, scalarVal(0.0))
                 }
             }
         }

@@ -111,6 +111,13 @@ class Renderer {
     var fullscreenQuadBuffer:MTLBuffer!
     var unitVectorXYZBuffer:MTLBuffer!
     var hudQuadBuffer: MTLBuffer!
+    var hudSegmentBuffer: MTLBuffer!
+    var hudSegmentVertexCount: Int = 0
+    var hudSegmentTexcoordOffset: Int = 0
+    var hudDiskBuffer: MTLBuffer!
+    var hudDiskVertexCount: Int = 0
+    var hudDiskTexcoordOffset: Int = 0
+    var hudTriangleBuffer: MTLBuffer!
     var encodingGamma: Float = 1.0
     var lastReconfigureTime: Double = 0.0
     
@@ -157,6 +164,43 @@ class Renderer {
     //else, we alpha blend them
     //playing with this variable will decide how much the foreground and background blend together
     var chromaKeyLerpDistRange = simd_float2(0.005, 0.1);
+
+    private static func buildHudRingSegmentData(angleStart: Float, angleEnd: Float, innerRadius: Float, outerRadius: Float, steps: Int) -> ([Float], Int, Int) {
+        let safeSteps = max(3, steps)
+        let vertexCount = (safeSteps + 1) * 2
+        var positions: [Float] = []
+        positions.reserveCapacity(vertexCount * 3)
+        for i in 0...safeSteps {
+            let t = Float(i) / Float(safeSteps)
+            let angle = angleStart + (angleEnd - angleStart) * t
+            let c = cos(angle)
+            let s = sin(angle)
+            positions.append(contentsOf: [c * innerRadius, s * innerRadius, 0.0])
+            positions.append(contentsOf: [c * outerRadius, s * outerRadius, 0.0])
+        }
+        var data = positions
+        data.append(contentsOf: Array(repeating: 0.0, count: vertexCount * 2))
+        let texcoordOffset = positions.count * MemoryLayout<Float>.size
+        return (data, vertexCount, texcoordOffset)
+    }
+
+    private static func buildHudDiskData(radius: Float, steps: Int) -> ([Float], Int, Int) {
+        let safeSteps = max(6, steps)
+        let vertexCount = safeSteps * 3
+        var positions: [Float] = []
+        positions.reserveCapacity(vertexCount * 3)
+        for i in 0..<safeSteps {
+            let a0 = Float(i) / Float(safeSteps) * 2.0 * Float.pi
+            let a1 = Float(i + 1) / Float(safeSteps) * 2.0 * Float.pi
+            positions.append(contentsOf: [0.0, 0.0, 0.0])
+            positions.append(contentsOf: [cos(a0) * radius, sin(a0) * radius, 0.0])
+            positions.append(contentsOf: [cos(a1) * radius, sin(a1) * radius, 0.0])
+        }
+        var data = positions
+        data.append(contentsOf: Array(repeating: 0.0, count: vertexCount * 2))
+        let texcoordOffset = positions.count * MemoryLayout<Float>.size
+        return (data, vertexCount, texcoordOffset)
+    }
     
     init(_ layerRenderer: LayerRenderer?) {
         self.layerRenderer = layerRenderer
@@ -239,6 +283,32 @@ class Renderer {
         
         hudQuadVertices.withUnsafeBytes {
             hudQuadBuffer = device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
+        }
+        
+        let segmentData = Renderer.buildHudRingSegmentData(angleStart: -Float.pi / 4.0,
+                                                           angleEnd: Float.pi / 4.0,
+                                                           innerRadius: 0.55,
+                                                           outerRadius: 1.0,
+                                                           steps: 18)
+        hudSegmentBuffer = device.makeBuffer(bytes: segmentData.0, length: segmentData.0.count * MemoryLayout<Float>.size)
+        hudSegmentVertexCount = segmentData.1
+        hudSegmentTexcoordOffset = segmentData.2
+        
+        let diskData = Renderer.buildHudDiskData(radius: 1.0, steps: 22)
+        hudDiskBuffer = device.makeBuffer(bytes: diskData.0, length: diskData.0.count * MemoryLayout<Float>.size)
+        hudDiskVertexCount = diskData.1
+        hudDiskTexcoordOffset = diskData.2
+        
+        let triangleVertices: [Float] = [
+            0.0, 0.6, 0.0,
+            -0.5, -0.4, 0.0,
+            0.5, -0.4, 0.0,
+            0.0, 0.0,
+            0.0, 0.0,
+            0.0, 0.0
+        ]
+        triangleVertices.withUnsafeBytes {
+            hudTriangleBuffer = device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
         }
         
         self.videoFrameDepthPipelineState = try! Renderer.buildRenderPipelineForVideoFrameDepthWithDevice(
@@ -550,11 +620,12 @@ class Renderer {
             }
             if !modeSwitchActive, let start = modeSwitchGestureStart, now - start > modeSwitchHoldThreshold {
                 modeSwitchActive = true
-                modeSwitchSelection = WorldTracker.shared.controllersAreDisabledByClickTogether ? 0 : 1
+                modeSwitchSelection = WorldTracker.shared.handEmulationMode.rawValue
             }
         } else {
             if modeSwitchActive {
-                WorldTracker.shared.controllersAreDisabledByClickTogether = (modeSwitchSelection == 0)
+                let selected = HandEmulationMode(rawValue: modeSwitchSelection) ?? .gripTrigger
+                WorldTracker.shared.setHandEmulationMode(selected)
             }
             modeSwitchActive = false
             modeSwitchGestureStart = nil
@@ -606,14 +677,24 @@ class Renderer {
         
         let pinchDelta = rightPinch - WorldTracker.shared.rightPinchStartPosition
         let selectDeadzone: Float = 0.015
-        if !pinchDelta.isUnsanitary() && simd_length(pinchDelta) > selectDeadzone {
+        if modeSwitchActive && !pinchDelta.isUnsanitary() {
             let selectX = simd_dot(pinchDelta, hudRight)
-            if abs(selectX) > selectDeadzone {
-                modeSwitchSelection = selectX < 0.0 ? 0 : 1
+            let selectY = simd_dot(pinchDelta, hudUp)
+            let distance = simd_length(simd_float2(selectX, selectY))
+            if distance > selectDeadzone {
+                let angle = atan2(selectY, selectX)
+                let segmentCount = 4
+                let segmentAngle = (2.0 * Float.pi) / Float(segmentCount)
+                var normalized = angle
+                if normalized < 0.0 {
+                    normalized += 2.0 * Float.pi
+                }
+                let idx = Int((normalized + segmentAngle * 0.5) / segmentAngle) % segmentCount
+                modeSwitchSelection = idx
             }
         }
         
-        let hudCenter = anchor + (toHead * 0.06) + (hudUp * 0.03)
+        let hudCenter = anchor + (toHead * 0.065) + (hudUp * 0.035)
         let baseTransform = hudCenter.asFloat4x4() * rotation
         
         func scaleMatrix(_ scale: simd_float3) -> simd_float4x4 {
@@ -623,23 +704,33 @@ class Renderer {
                                  simd_float4(0.0, 0.0, 0.0, 1.0))
         }
         
-        let baseScale: Float = 0.09
-        let tileScale: Float = 0.035
-        let tileOffset: Float = 0.035
-        let highlightScale: Float = 0.043
+        func rotationZ(_ angle: Float) -> simd_float4x4 {
+            return simd_float4x4(simd_quatf(angle: angle, axis: simd_float3(0.0, 0.0, 1.0)))
+        }
         
-        let baseColor = simd_float4(0.03, 0.04, 0.06, 0.65 * modeSwitchAlpha)
-        let leftColor = simd_float4(0.2, 0.85, 0.4, 0.9 * modeSwitchAlpha)
-        let rightColor = simd_float4(0.25, 0.55, 0.95, 0.9 * modeSwitchAlpha)
-        let highlightColor = simd_float4(0.95, 0.95, 0.98, 0.85 * modeSwitchAlpha)
+        let wheelScale: Float = 0.12
+        let iconScale: Float = 0.03
+        let iconRadius: Float = 0.08
+        let segmentCount = 4
+        let segmentAngle = (2.0 * Float.pi) / Float(segmentCount)
+        let pulse = 0.6 + 0.4 * sin(Float(CACurrentMediaTime() * 6.0))
+        
+        let baseColor = simd_float4(0.04, 0.05, 0.08, 0.7 * modeSwitchAlpha)
+        let segmentColors = [
+            simd_float4(0.15, 0.75, 0.95, 0.8 * modeSwitchAlpha),
+            simd_float4(0.25, 0.95, 0.45, 0.8 * modeSwitchAlpha),
+            simd_float4(0.95, 0.75, 0.2, 0.8 * modeSwitchAlpha),
+            simd_float4(0.85, 0.25, 0.35, 0.8 * modeSwitchAlpha)
+        ]
+        let highlightColor = simd_float4(0.98, 0.98, 1.0, (0.75 + 0.25 * pulse) * modeSwitchAlpha)
+        let iconColor = simd_float4(0.95, 0.97, 0.98, 0.9 * modeSwitchAlpha)
+        let iconDimColor = simd_float4(0.4, 0.45, 0.5, 0.7 * modeSwitchAlpha)
         
         renderEncoder.setDepthStencilState(depthStateAlways)
-        renderEncoder.setVertexBuffer(hudQuadBuffer, offset: 0, index: VertexAttribute.position.rawValue)
-        renderEncoder.setVertexBuffer(hudQuadBuffer, offset: hudQuadTexcoordOffset, index: VertexAttribute.texcoord.rawValue)
         renderEncoder.setTriangleFillMode(.fill)
         
         var firstBind = true
-        func drawQuad(_ transform: simd_float4x4, _ color: simd_float4) {
+        func bindPlaneUniform(_ transform: simd_float4x4, _ color: simd_float4) {
             selectNextPlaneUniformBuffer()
             planeUniforms[0].planeTransform = transform
             planeUniforms[0].planeColor = color
@@ -650,20 +741,89 @@ class Renderer {
             } else {
                 renderEncoder.setVertexBufferOffset(planeUniformBufferOffset, index: BufferIndex.planeUniforms.rawValue)
             }
+        }
+        
+        func drawQuad(_ transform: simd_float4x4, _ color: simd_float4) {
+            renderEncoder.setVertexBuffer(hudQuadBuffer, offset: 0, index: VertexAttribute.position.rawValue)
+            renderEncoder.setVertexBuffer(hudQuadBuffer, offset: hudQuadTexcoordOffset, index: VertexAttribute.texcoord.rawValue)
+            bindPlaneUniform(transform, color)
             renderEncoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         }
         
-        drawQuad(baseTransform * scaleMatrix(simd_float3(repeating: baseScale)), baseColor)
+        func drawSegment(_ transform: simd_float4x4, _ color: simd_float4) {
+            renderEncoder.setVertexBuffer(hudSegmentBuffer, offset: 0, index: VertexAttribute.position.rawValue)
+            renderEncoder.setVertexBuffer(hudSegmentBuffer, offset: hudSegmentTexcoordOffset, index: VertexAttribute.texcoord.rawValue)
+            bindPlaneUniform(transform, color)
+            renderEncoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: hudSegmentVertexCount)
+        }
         
-        let leftTransform = baseTransform * simd_float3(-tileOffset, 0.0, 0.001).asFloat4x4() * scaleMatrix(simd_float3(repeating: tileScale))
-        let rightTransform = baseTransform * simd_float3(tileOffset, 0.0, 0.001).asFloat4x4() * scaleMatrix(simd_float3(repeating: tileScale))
-        drawQuad(leftTransform, leftColor)
-        drawQuad(rightTransform, rightColor)
+        func drawDisk(_ transform: simd_float4x4, _ color: simd_float4) {
+            renderEncoder.setVertexBuffer(hudDiskBuffer, offset: 0, index: VertexAttribute.position.rawValue)
+            renderEncoder.setVertexBuffer(hudDiskBuffer, offset: hudDiskTexcoordOffset, index: VertexAttribute.texcoord.rawValue)
+            bindPlaneUniform(transform, color)
+            renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: hudDiskVertexCount)
+        }
         
-        let highlightOffset = modeSwitchSelection == 0 ? -tileOffset : tileOffset
-        let highlightTransform = baseTransform * simd_float3(highlightOffset, 0.0, 0.002).asFloat4x4()
-            * scaleMatrix(simd_float3(repeating: highlightScale))
-        drawQuad(highlightTransform, highlightColor)
+        func drawTriangle(_ transform: simd_float4x4, _ color: simd_float4) {
+            renderEncoder.setVertexBuffer(hudTriangleBuffer, offset: 0, index: VertexAttribute.position.rawValue)
+            renderEncoder.setVertexBuffer(hudTriangleBuffer, offset: 9 * MemoryLayout<Float>.size, index: VertexAttribute.texcoord.rawValue)
+            bindPlaneUniform(transform, color)
+            renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        }
+        
+        drawDisk(baseTransform * scaleMatrix(simd_float3(repeating: wheelScale * 1.08)), baseColor)
+        
+        for i in 0..<segmentCount {
+            let angle = Float(i) * segmentAngle
+            let segmentTransform = baseTransform * rotationZ(angle) * scaleMatrix(simd_float3(repeating: wheelScale))
+            drawSegment(segmentTransform, segmentColors[i])
+            if i == modeSwitchSelection {
+                let popTransform = baseTransform * rotationZ(angle) * scaleMatrix(simd_float3(repeating: wheelScale * 1.08))
+                drawSegment(popTransform, highlightColor)
+            }
+        }
+        
+        drawDisk(baseTransform * scaleMatrix(simd_float3(repeating: wheelScale * 0.38)),
+                 simd_float4(0.08, 0.1, 0.14, 0.85 * modeSwitchAlpha))
+        
+        let selectedAngle = Float(modeSwitchSelection) * segmentAngle
+        let indicatorTransform = baseTransform * rotationZ(selectedAngle)
+            * simd_float3(0.0, wheelScale * 0.45, 0.004).asFloat4x4()
+            * scaleMatrix(simd_float3(0.02, 0.08, 1.0))
+        drawQuad(indicatorTransform, highlightColor)
+        
+        for i in 0..<segmentCount {
+            let angle = Float(i) * segmentAngle
+            let iconOffset = simd_float3(cos(angle) * iconRadius, sin(angle) * iconRadius, 0.004)
+            let iconTransform = baseTransform * iconOffset.asFloat4x4() * scaleMatrix(simd_float3(repeating: iconScale))
+            let color = (i == modeSwitchSelection) ? iconColor : iconDimColor
+            switch i {
+            case 0:
+                let bar = simd_float3(0.0, 0.0, 0.0).asFloat4x4() * scaleMatrix(simd_float3(0.18, 0.8, 1.0))
+                drawQuad(iconTransform * bar, color)
+                let bar2 = simd_float3(0.0, 0.0, 0.0).asFloat4x4() * scaleMatrix(simd_float3(0.8, 0.18, 1.0))
+                drawQuad(iconTransform * bar2, color)
+            case 1:
+                let palm = simd_float3(0.0, -0.1, 0.0).asFloat4x4() * scaleMatrix(simd_float3(0.9, 0.7, 1.0))
+                drawQuad(iconTransform * palm, color)
+                let finger = simd_float3(-0.25, 0.45, 0.0).asFloat4x4() * scaleMatrix(simd_float3(0.25, 0.35, 1.0))
+                drawQuad(iconTransform * finger, color)
+                let finger2 = simd_float3(0.0, 0.45, 0.0).asFloat4x4() * scaleMatrix(simd_float3(0.25, 0.35, 1.0))
+                drawQuad(iconTransform * finger2, color)
+                let finger3 = simd_float3(0.25, 0.45, 0.0).asFloat4x4() * scaleMatrix(simd_float3(0.25, 0.35, 1.0))
+                drawQuad(iconTransform * finger3, color)
+            case 2:
+                let bar = simd_float3(-0.22, 0.0, 0.0).asFloat4x4() * scaleMatrix(simd_float3(0.18, 0.8, 1.0))
+                drawQuad(iconTransform * bar, color)
+                let trigger = simd_float3(0.2, -0.1, 0.0).asFloat4x4() * scaleMatrix(simd_float3(0.3, 0.6, 1.0))
+                drawQuad(iconTransform * trigger, color)
+            default:
+                let ring = iconTransform * scaleMatrix(simd_float3(repeating: 0.8))
+                drawDisk(ring, color * simd_float4(1.0, 1.0, 1.0, 0.5))
+                let slash = iconTransform * rotationZ(Float.pi / 4.0) * scaleMatrix(simd_float3(0.15, 1.0, 1.0))
+                drawQuad(slash, color)
+            }
+        }
     }
 
     // Writes FOV/tangents/etc information to the uniform buffer.
