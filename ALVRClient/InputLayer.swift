@@ -7,6 +7,7 @@
 
 import Foundation
 import simd
+import QuartzCore
 
 /// Input layer types that define how hand tracking is interpreted
 enum InputLayerType: Int, CaseIterable, Codable {
