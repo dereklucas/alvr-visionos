@@ -625,6 +625,7 @@ class Renderer {
         } else {
             if modeSwitchActive {
                 let selected = HandEmulationMode(rawValue: modeSwitchSelection) ?? .gripTrigger
+                print("hand-emulation-wheel", "apply", selected.rawValue)
                 WorldTracker.shared.setHandEmulationMode(selected)
             }
             modeSwitchActive = false
@@ -764,11 +765,51 @@ class Renderer {
             renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: hudDiskVertexCount)
         }
         
-        func drawTriangle(_ transform: simd_float4x4, _ color: simd_float4) {
-            renderEncoder.setVertexBuffer(hudTriangleBuffer, offset: 0, index: VertexAttribute.position.rawValue)
-            renderEncoder.setVertexBuffer(hudTriangleBuffer, offset: 9 * MemoryLayout<Float>.size, index: VertexAttribute.texcoord.rawValue)
-            bindPlaneUniform(transform, color)
-            renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        let glyphs: [Character: [UInt8]] = [
+            "J": [0b111, 0b001, 0b001, 0b101, 0b010],
+            "O": [0b111, 0b101, 0b101, 0b101, 0b111],
+            "Y": [0b101, 0b101, 0b010, 0b010, 0b010],
+            "G": [0b111, 0b100, 0b101, 0b101, 0b111],
+            "R": [0b110, 0b101, 0b110, 0b101, 0b101],
+            "I": [0b111, 0b010, 0b010, 0b010, 0b111],
+            "P": [0b110, 0b101, 0b110, 0b100, 0b100],
+            "H": [0b101, 0b101, 0b111, 0b101, 0b101],
+            "B": [0b110, 0b101, 0b110, 0b101, 0b110],
+            "F": [0b111, 0b100, 0b110, 0b100, 0b100]
+        ]
+
+        func drawLabel(_ label: String, _ transform: simd_float4x4, _ color: simd_float4) {
+            let pixel: Float = 0.18
+            let gap: Float = 0.06
+            let cell = pixel + gap
+            let charWidth = 3.0 * cell - gap
+            let charHeight = 5.0 * cell - gap
+            let letterSpacing: Float = 0.25
+
+            let totalWidth = (charWidth * Float(label.count)) + (letterSpacing * Float(max(label.count - 1, 0)))
+            var cursorX = -totalWidth * 0.5
+            let baseY = -charHeight * 0.5
+
+            for ch in label {
+                guard let rows = glyphs[ch] else {
+                    cursorX += charWidth + letterSpacing
+                    continue
+                }
+                for (rowIdx, rowBits) in rows.enumerated() {
+                    for col in 0..<3 {
+                        if (rowBits & (1 << (2 - col))) == 0 {
+                            continue
+                        }
+                        let x = cursorX + (Float(col) * cell)
+                        let y = baseY + (Float(4 - rowIdx) * cell)
+                        let pixelTransform = transform
+                            * simd_float3(x, y, 0.0).asFloat4x4()
+                            * scaleMatrix(simd_float3(pixel, pixel, 1.0))
+                        drawQuad(pixelTransform, color)
+                    }
+                }
+                cursorX += charWidth + letterSpacing
+            }
         }
         
         drawDisk(baseTransform * scaleMatrix(simd_float3(repeating: wheelScale * 1.08)), baseColor)
@@ -797,32 +838,18 @@ class Renderer {
             let iconOffset = simd_float3(cos(angle) * iconRadius, sin(angle) * iconRadius, 0.004)
             let iconTransform = baseTransform * iconOffset.asFloat4x4() * scaleMatrix(simd_float3(repeating: iconScale))
             let color = (i == modeSwitchSelection) ? iconColor : iconDimColor
+            let label: String
             switch i {
             case 0:
-                let bar = simd_float3(0.0, 0.0, 0.0).asFloat4x4() * scaleMatrix(simd_float3(0.18, 0.8, 1.0))
-                drawQuad(iconTransform * bar, color)
-                let bar2 = simd_float3(0.0, 0.0, 0.0).asFloat4x4() * scaleMatrix(simd_float3(0.8, 0.18, 1.0))
-                drawQuad(iconTransform * bar2, color)
+                label = "JOY"
             case 1:
-                let palm = simd_float3(0.0, -0.1, 0.0).asFloat4x4() * scaleMatrix(simd_float3(0.9, 0.7, 1.0))
-                drawQuad(iconTransform * palm, color)
-                let finger = simd_float3(-0.25, 0.45, 0.0).asFloat4x4() * scaleMatrix(simd_float3(0.25, 0.35, 1.0))
-                drawQuad(iconTransform * finger, color)
-                let finger2 = simd_float3(0.0, 0.45, 0.0).asFloat4x4() * scaleMatrix(simd_float3(0.25, 0.35, 1.0))
-                drawQuad(iconTransform * finger2, color)
-                let finger3 = simd_float3(0.25, 0.45, 0.0).asFloat4x4() * scaleMatrix(simd_float3(0.25, 0.35, 1.0))
-                drawQuad(iconTransform * finger3, color)
+                label = "GRIP"
             case 2:
-                let bar = simd_float3(-0.22, 0.0, 0.0).asFloat4x4() * scaleMatrix(simd_float3(0.18, 0.8, 1.0))
-                drawQuad(iconTransform * bar, color)
-                let trigger = simd_float3(0.2, -0.1, 0.0).asFloat4x4() * scaleMatrix(simd_float3(0.3, 0.6, 1.0))
-                drawQuad(iconTransform * trigger, color)
+                label = "HYB"
             default:
-                let ring = iconTransform * scaleMatrix(simd_float3(repeating: 0.8))
-                drawDisk(ring, color * simd_float4(1.0, 1.0, 1.0, 0.5))
-                let slash = iconTransform * rotationZ(Float.pi / 4.0) * scaleMatrix(simd_float3(0.15, 1.0, 1.0))
-                drawQuad(slash, color)
+                label = "OFF"
             }
+            drawLabel(label, iconTransform, color)
         }
     }
 

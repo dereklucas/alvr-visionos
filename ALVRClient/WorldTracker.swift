@@ -285,6 +285,12 @@ class WorldTracker {
     var lastRightHandPose: AlvrPose = AlvrPose()
     var lastRightHandVel: (Float, Float, Float) = (0,0,0)
     var lastRightHandAngVel: (Float, Float, Float) = (0,0,0)
+    var lastLeftHandTrackerPose: AlvrPose = AlvrPose()
+    var lastLeftHandTrackerVel: (Float, Float, Float) = (0,0,0)
+    var lastLeftHandTrackerAngVel: (Float, Float, Float) = (0,0,0)
+    var lastRightHandTrackerPose: AlvrPose = AlvrPose()
+    var lastRightHandTrackerVel: (Float, Float, Float) = (0,0,0)
+    var lastRightHandTrackerAngVel: (Float, Float, Float) = (0,0,0)
     
     // Controller haptics
     var leftHapticsStart: TimeInterval = 0
@@ -309,6 +315,7 @@ class WorldTracker {
     // Tell streamer we have PSVR active interaction profile
     var detectedPsvr = false
     static let psvrInteractionProfile = alvr_path_string_to_id("/interaction_profiles/sony/playstation_vr2_sense_controller")
+    static let questInteractionProfile = alvr_path_string_to_id("/interaction_profiles/oculus/touch_controller")
 
     // Face tracking
     var fbFaceTracking = Array(repeating: Float(0.0), count: 70)
@@ -319,6 +326,8 @@ class WorldTracker {
     static let deviceIdHead = alvr_path_string_to_id("/user/head")
     static let deviceIdLeftHand = alvr_path_string_to_id("/user/hand/left")
     static let deviceIdRightHand = alvr_path_string_to_id("/user/hand/right")
+    static let deviceIdLeftHandTracker = alvr_path_string_to_id("/user/hand_tracker/left")
+    static let deviceIdRightHandTracker = alvr_path_string_to_id("/user/hand_tracker/right")
     static let deviceIdLeftForearm = alvr_path_string_to_id("/user/body/left_knee") // TODO: add a real forearm point?
     static let deviceIdRightForearm = alvr_path_string_to_id("/user/body/right_knee") // TODO: add a real forearm point?
     static let deviceIdLeftElbow = alvr_path_string_to_id("/user/body/left_elbow")
@@ -352,6 +361,7 @@ class WorldTracker {
     static let leftTriggerTouched = alvr_path_string_to_id("/user/hand/left/input/trigger/touch")
     static let leftSqueezeTouched = alvr_path_string_to_id("/user/hand/left/input/squeeze/touch")
     static let leftThumbstickTouched = alvr_path_string_to_id("/user/hand/left/input/thumbstick/touch")
+    static let leftThumbrestTouched = alvr_path_string_to_id("/user/hand/left/input/thumbrest/touch")
     static let leftSystemTouched = alvr_path_string_to_id("/user/hand/left/input/system/touch")
     static let leftMenuTouched = alvr_path_string_to_id("/user/hand/left/input/menu/touch")
     
@@ -381,6 +391,7 @@ class WorldTracker {
     static let rightTriggerTouched = alvr_path_string_to_id("/user/hand/right/input/trigger/touch")
     static let rightSqueezeTouched = alvr_path_string_to_id("/user/hand/right/input/squeeze/touch")
     static let rightThumbstickTouched = alvr_path_string_to_id("/user/hand/right/input/thumbstick/touch")
+    static let rightThumbrestTouched = alvr_path_string_to_id("/user/hand/right/input/thumbrest/touch")
     static let rightSystemTouched = alvr_path_string_to_id("/user/hand/right/input/system/touch")
     static let rightMenuTouched = alvr_path_string_to_id("/user/hand/right/input/menu/touch")
     
@@ -441,6 +452,8 @@ class WorldTracker {
     var lastLeftIsPinching = false
     var leftPinchTrigger: Float = 0.0
     var bothPinchSystemButtonTime: Float = 0.0
+    var leftStickStartOrientation = simd_quatf()
+    var leftStickIsActive = false
     
     var rightSelectionRayId = -1
     var rightSelectionRayOrigin = simd_float3(0.0, 0.0, 0.0)
@@ -452,6 +465,13 @@ class WorldTracker {
     var rightIsPinching = false
     var lastRightIsPinching = false
     var rightPinchTrigger: Float = 0.0
+    var rightStickStartOrientation = simd_quatf()
+    var rightStickIsActive = false
+    var lastHandEmuLogTime: TimeInterval = 0.0
+    var lastHandTriggerLogTime: TimeInterval = 0.0
+    var lastHandEmuRightLogTime: TimeInterval = 0.0
+    var lastLoggedGamepadSkipMode: HandEmulationMode = .off
+    var lastPsvrLogTime: TimeInterval = 0.0
     
     var lastPinchSentTime = 0.0
     var leftPinchEyeDelta = simd_float3()
@@ -530,6 +550,7 @@ class WorldTracker {
     }
 
     func setHandEmulationMode(_ mode: HandEmulationMode) {
+        print("hand-emulation-mode", "set", mode.rawValue)
         handEmulationMode = mode
         let enableHands = mode != .off
         ALVRClientApp.gStore.settings.emulatedPinchInteractions = enableHands
@@ -537,6 +558,60 @@ class WorldTracker {
         leftPinchTrigger = 0.0
         rightPinchTrigger = 0.0
         bothPinchSystemButtonTime = 0.0
+        updateActiveInteractionProfile(for: mode)
+    }
+    
+    private func updateActiveInteractionProfile(for mode: HandEmulationMode) {
+        let profileId: UInt64
+        switch mode {
+        case .off:
+            profileId = WorldTracker.questInteractionProfile
+        case .joystick, .gripTrigger, .hybrid:
+            profileId = WorldTracker.questInteractionProfile
+        }
+        print("hand-emulation-profile", "mode:", mode.rawValue, "profileId:", profileId)
+        alvr_send_active_interaction_profile(WorldTracker.deviceIdLeftHand, profileId)
+        alvr_send_active_interaction_profile(WorldTracker.deviceIdRightHand, profileId)
+        sendCustomInteractionProfile()
+    }
+
+    private func sendCustomInteractionProfile() {
+        let inputIds: [UInt64] = [
+            WorldTracker.leftButtonX,
+            WorldTracker.leftButtonXTouched,
+            WorldTracker.leftButtonY,
+            WorldTracker.leftButtonYTouched,
+            WorldTracker.leftMenuClick,
+            WorldTracker.leftSqueezeValue,
+            WorldTracker.leftTriggerValue,
+            WorldTracker.leftTriggerTouched,
+            WorldTracker.leftThumbstickX,
+            WorldTracker.leftThumbstickY,
+            WorldTracker.leftThumbstickClick,
+            WorldTracker.leftThumbstickTouched,
+            WorldTracker.leftThumbrestTouched,
+            WorldTracker.rightButtonA,
+            WorldTracker.rightButtonATouched,
+            WorldTracker.rightButtonB,
+            WorldTracker.rightButtonBTouched,
+            WorldTracker.rightSystemClick,
+            WorldTracker.rightSqueezeValue,
+            WorldTracker.rightTriggerValue,
+            WorldTracker.rightTriggerTouched,
+            WorldTracker.rightThumbstickX,
+            WorldTracker.rightThumbstickY,
+            WorldTracker.rightThumbstickClick,
+            WorldTracker.rightThumbstickTouched,
+            WorldTracker.rightThumbrestTouched
+        ]
+        inputIds.withUnsafeBufferPointer { buffer in
+            guard let base = buffer.baseAddress else {
+                return
+            }
+            alvr_send_custom_interaction_profile(WorldTracker.deviceIdLeftHand, base, UInt64(buffer.count))
+            alvr_send_custom_interaction_profile(WorldTracker.deviceIdRightHand, base, UInt64(buffer.count))
+        }
+        print("hand-emulation-custom-profile", "inputs:", inputIds.count)
     }
     
     func initializeAr() async  {
@@ -1291,6 +1366,39 @@ class WorldTracker {
         
         return AlvrDeviceMotion(device_id: device_id, pose: pose, linear_velocity: lin_vel, angular_velocity: ang_vel)
     }
+
+    func handAnchorToHandTrackerDeviceMotion(_ hand: HandAnchor, _ targetTs: Double, _ deviceId: UInt64) -> AlvrDeviceMotion {
+        let isLeft = hand.chirality == .left
+        let lastPose: AlvrPose = isLeft ? lastLeftHandTrackerPose : lastRightHandTrackerPose
+        let pose: AlvrPose = filterHandPose(lastPose, handAnchorToPose(hand, false), 0.99)
+        let dp = (pose.position.0 - lastPose.position.0, pose.position.1 - lastPose.position.1, pose.position.2 - lastPose.position.2)
+        var dt = Float(lastHandsUpdatedTs - lastSentHandsTs)
+        if dt <= 0.0 {
+            dt = 0.010 // fallback 10ms
+        }
+        let lin_vel = (dp.0 / dt, dp.1 / dt, dp.2 / dt)
+        let ang_vel = angularVelocityBetweenQuats(lastPose.orientation, pose.orientation, dt)
+
+        if !hand.isTracked {
+            return AlvrDeviceMotion(device_id: deviceId,
+                                    pose: isLeft ? lastLeftHandTrackerPose : lastRightHandTrackerPose,
+                                    linear_velocity: isLeft ? lastLeftHandTrackerVel : lastRightHandTrackerVel,
+                                    angular_velocity: isLeft ? lastLeftHandTrackerAngVel : lastRightHandTrackerAngVel)
+        }
+
+        if isLeft {
+            lastLeftHandTrackerPose = pose
+            lastLeftHandTrackerVel = lin_vel
+            lastLeftHandTrackerAngVel = ang_vel
+        }
+        else {
+            lastRightHandTrackerPose = pose
+            lastRightHandTrackerVel = lin_vel
+            lastRightHandTrackerAngVel = ang_vel
+        }
+
+        return AlvrDeviceMotion(device_id: deviceId, pose: pose, linear_velocity: lin_vel, angular_velocity: ang_vel)
+    }
     
     func quatDifference(_ a: simd_quatf, _ b: simd_quatf) -> simd_quatf {
         let delta = a * b.inverse
@@ -1398,6 +1506,59 @@ class WorldTracker {
         let x = simd_dot(delta, axisRight) / sensitivity
         let y = simd_dot(delta, axisUp) / sensitivity
         return simd_float2(min(max(x, -1.0), 1.0), min(max(y, -1.0), 1.0))
+    }
+
+    private func jointWorldPosition(_ hand: HandAnchor, _ jointName: HandSkeleton.JointName) -> simd_float3? {
+        guard let skeleton = hand.handSkeleton else {
+            return nil
+        }
+        let joint = skeleton.joint(jointName)
+        let transform = hand.originFromAnchorTransform * joint.anchorFromJointTransform
+        return transform.columns.3.asFloat3()
+    }
+
+    private func fingerCurl(_ hand: HandAnchor, knuckle: HandSkeleton.JointName, tip: HandSkeleton.JointName) -> Float? {
+        guard let wristPos = jointWorldPosition(hand, .wrist),
+              let knucklePos = jointWorldPosition(hand, knuckle),
+              let tipPos = jointWorldPosition(hand, tip) else {
+            return nil
+        }
+        let toTip = tipPos - knucklePos
+        let toWrist = wristPos - knucklePos
+        if simd_length(toTip) < 0.001 || simd_length(toWrist) < 0.001 {
+            return nil
+        }
+        let dot = simd_dot(simd_normalize(toTip), simd_normalize(toWrist))
+        let curl = (dot + 1.0) * 0.5
+        return max(0.0, min(1.0, curl))
+    }
+
+    private func handInputState(_ hand: HandAnchor?) -> (pinch: Float, grip: Float, fist: Bool, orientation: simd_quatf)? {
+        guard let hand = hand else {
+            return nil
+        }
+        guard let indexCurl = fingerCurl(hand, knuckle: .indexFingerKnuckle, tip: .indexFingerTip),
+              let middleCurl = fingerCurl(hand, knuckle: .middleFingerKnuckle, tip: .middleFingerTip),
+              let ringCurl = fingerCurl(hand, knuckle: .ringFingerKnuckle, tip: .ringFingerTip),
+              let littleCurl = fingerCurl(hand, knuckle: .littleFingerKnuckle, tip: .littleFingerTip),
+              let thumbTip = jointWorldPosition(hand, .thumbTip),
+              let indexTip = jointWorldPosition(hand, .indexFingerTip),
+              let indexKnuckle = jointWorldPosition(hand, .indexFingerKnuckle),
+              let littleKnuckle = jointWorldPosition(hand, .littleFingerKnuckle) else {
+            return nil
+        }
+        let gripCurl = max(0.0, min(1.0, (middleCurl + ringCurl + littleCurl) / 3.0))
+        let fistThreshold: Float = 0.65
+        let fist = indexCurl >= fistThreshold && middleCurl >= fistThreshold && ringCurl >= fistThreshold && littleCurl >= fistThreshold
+
+        let palmSize = max(simd_length(indexKnuckle - littleKnuckle), 0.001)
+        let pinchDistance = simd_length(thumbTip - indexTip)
+        let pinchMin = palmSize * 0.05
+        let pinchMax = palmSize * 0.65
+        let pinch = max(0.0, min(1.0, (pinchMax - pinchDistance) / (pinchMax - pinchMin)))
+
+        let orientation = handAnchorToPose(hand, false).orientation.asQuatf()
+        return (pinch, gripCurl, fist, orientation)
     }
     
     func handAnchorToSkeleton(_ hand: HandAnchor) -> [AlvrPose]? {
@@ -1644,6 +1805,14 @@ class WorldTracker {
     }
     
     func sendGamepadInputs() {
+        if handEmulationMode != .off {
+            if lastLoggedGamepadSkipMode != handEmulationMode {
+                print("hand-emulation-gamepad-skip", "mode:", handEmulationMode.rawValue)
+                lastLoggedGamepadSkipMode = handEmulationMode
+            }
+            return
+        }
+        lastLoggedGamepadSkipMode = .off
         func boolVal(_ val: Bool) -> AlvrButtonValue {
             return AlvrButtonValue(tag: ALVR_BUTTON_VALUE_BINARY, AlvrButtonValue.__Unnamed_union___Anonymous_field1(AlvrButtonValue.__Unnamed_union___Anonymous_field1.__Unnamed_struct___Anonymous_field0(binary: val)))
         }
@@ -1849,6 +2018,16 @@ class WorldTracker {
                         alvr_send_button(WorldTracker.leftSystemTouched, boolVal(buttons["Button Menu"]?.touchedInput?.isTouched ?? false))
                         alvr_send_button(WorldTracker.leftMenuClick, boolVal(buttons["Button Menu"]?.pressedInput.isPressed ?? false))
                         alvr_send_button(WorldTracker.leftSystemClick, boolVal(buttons["Button Menu"]?.pressedInput.isPressed ?? false))
+
+                        let now = CACurrentMediaTime()
+                        if now - lastPsvrLogTime > 1.0 {
+                            let lx = String(format: "%.2f", dpads["Thumbstick"]?.xAxis.value ?? 0.0)
+                            let ly = String(format: "%.2f", dpads["Thumbstick"]?.yAxis.value ?? 0.0)
+                            let trig = String(format: "%.2f", buttons["Trigger"]?.pressedInput.value ?? 0.0)
+                            let grip = buttons["Grip"]?.pressedInput.isPressed ?? false
+                            print("psvr2-left", "stick:", lx, ly, "trigger:", trig, "grip:", grip)
+                            lastPsvrLogTime = now
+                        }
 
                     }
                     else {
@@ -2657,32 +2836,39 @@ class WorldTracker {
 
         // MARK: Hand poses/controller poses to ALVR motions
         if let leftHand = handPoses.leftHand {
-            let handMotion = handAnchorToAlvrDeviceMotion(leftHand, controllerPredictionTimestamp)
-            
+            let handTrackerMotion = handAnchorToHandTrackerDeviceMotion(leftHand, controllerPredictionTimestamp, WorldTracker.deviceIdLeftHandTracker)
+
             // Hand motion overrides skeletons, so only send either or
             if leftHand.isTracked && leftSkeletonDisableHysteresis <= 0.0 {
                 skeletonLeft = handAnchorToSkeleton(leftHand)
                 if !steamVRInput2p0Enabled {
-                    trackingMotions.append(handMotion)
+                    trackingMotions.append(handTrackerMotion)
                 }
             }
             else {
-                trackingMotions.append(handMotion)
+                trackingMotions.append(handTrackerMotion)
+            }
+
+            if handEmulationMode != .off {
+                trackingMotions.append(handAnchorToAlvrDeviceMotion(leftHand, controllerPredictionTimestamp))
             }
         }
         if let rightHand = handPoses.rightHand {
-            let handMotion = handAnchorToAlvrDeviceMotion(rightHand, controllerPredictionTimestamp)
+            let handTrackerMotion = handAnchorToHandTrackerDeviceMotion(rightHand, controllerPredictionTimestamp, WorldTracker.deviceIdRightHandTracker)
 
-            
             // Hand motion overrides skeletons, so only send either or
             if rightHand.isTracked && rightSkeletonDisableHysteresis <= 0.0 {
                 skeletonRight = handAnchorToSkeleton(rightHand)
                 if !steamVRInput2p0Enabled {
-                    trackingMotions.append(handMotion)
+                    trackingMotions.append(handTrackerMotion)
                 }
             }
             else {
-                trackingMotions.append(handMotion)
+                trackingMotions.append(handTrackerMotion)
+            }
+
+            if handEmulationMode != .off {
+                trackingMotions.append(handAnchorToAlvrDeviceMotion(rightHand, controllerPredictionTimestamp))
             }
         }
         
@@ -2701,10 +2887,10 @@ class WorldTracker {
         // For hand gestures, we have to avoid sending controller motions
         if handGesturesEnabled {
             if skeletonLeft != nil {
-                trackingMotions.removeAll(where: {$0.device_id == WorldTracker.deviceIdLeftHand })
+                trackingMotions.removeAll(where: {$0.device_id == WorldTracker.deviceIdLeftHandTracker })
             }
             if skeletonRight != nil {
-                trackingMotions.removeAll(where: {$0.device_id == WorldTracker.deviceIdRightHand })
+                trackingMotions.removeAll(where: {$0.device_id == WorldTracker.deviceIdRightHandTracker })
             }
         }
         
@@ -2716,220 +2902,176 @@ class WorldTracker {
             return AlvrButtonValue(tag: ALVR_BUTTON_VALUE_SCALAR, AlvrButtonValue.__Unnamed_union___Anonymous_field1(AlvrButtonValue.__Unnamed_union___Anonymous_field1.__Unnamed_struct___Anonymous_field1(scalar: val)))
         }
         
-        // MARK: - Emulated pinch interactions overwrite emulated controller motions
-        if handEmulationMode == .gripTrigger {
-            // Menu press with two pinches
-            // (have to override triggers to prevent screenshot send)
-            var systemButton = WorldTracker.leftMenuClick
-            var systemIsRight = false
-            if let otherSettings = Settings.getAlvrSettings() {
-                let emulationMode = otherSettings.headset.controllers?.emulation_mode ?? ""
-                if emulationMode == "PSVR2Sense" {
-                    systemButton = WorldTracker.rightSystemClick
-                    systemIsRight = true
-                }
-            }
-            
-            let deltaSinceLastPinch = Float(max(CACurrentMediaTime() - lastPinchSentTime, 0.011))
-            lastPinchSentTime = CACurrentMediaTime()
-            
-            let skeletonHysteresisForPinches = defaultSkeletonDisableHysteresis
-            let pinchTriggerSpeed: Float = 0.15 * (deltaSinceLastPinch / 0.011)
-            
-            if (rightIsPinching && leftIsPinching) {
-                leftPinchTrigger -= pinchTriggerSpeed
-                if leftPinchTrigger < 0.0 {
-                    leftPinchTrigger = pinchTriggerSpeed
-                }
-                rightPinchTrigger -= pinchTriggerSpeed
-                if rightPinchTrigger < 0.0 {
-                    rightPinchTrigger = pinchTriggerSpeed
-                }
-                
-                bothPinchSystemButtonTime += pinchTriggerSpeed
-                if bothPinchSystemButtonTime > 1.0 {
-                    bothPinchSystemButtonTime = 1.0
-                }
+        // MARK: - Emulated hand interactions overwrite emulated controller motions
+        let leftHandAnchor = handPoses.leftHand
+        let rightHandAnchor = handPoses.rightHand
+        let leftHandTracked = leftHandAnchor?.isTracked ?? false
+        let rightHandTracked = rightHandAnchor?.isTracked ?? false
+        let leftHandHasSkeleton = leftHandAnchor?.handSkeleton != nil
+        let rightHandHasSkeleton = rightHandAnchor?.handSkeleton != nil
+        let leftHandState = handInputState(leftHandAnchor)
+        let rightHandState = handInputState(rightHandAnchor)
 
-                if leftPinchTrigger <= pinchTriggerSpeed && rightPinchTrigger <= pinchTriggerSpeed && bothPinchSystemButtonTime < 0.3 {
-                    alvr_send_button(systemButton, boolVal(true))
+        func sendTriggerAndGrip(_ state: (pinch: Float, grip: Float, fist: Bool, orientation: simd_quatf)?, isLeft: Bool) {
+            let triggerValue = state?.pinch ?? 0.0
+            let gripValue: Float = (state?.fist ?? false) ? 1.0 : 0.0
+            let triggerClick = triggerValue > 0.7
+            let triggerTouch = triggerValue > 0.1
+            let gripClick = gripValue > 0.7
+            let gripTouch = gripValue > 0.1
+            let now = CACurrentMediaTime()
+            if now - lastHandTriggerLogTime > 1.0 {
+                let handLabel = isLeft ? "left" : "right"
+                let pinch = String(format: "%.2f", state?.pinch ?? -1.0)
+                let grip = String(format: "%.2f", state?.grip ?? -1.0)
+                let fist = state?.fist ?? false
+                let mode = handEmulationMode
+                let tracked = isLeft ? leftHandTracked : rightHandTracked
+                let hasSkeleton = isLeft ? leftHandHasSkeleton : rightHandHasSkeleton
+                print("hand-emulation-trigger", handLabel, "mode:", mode.rawValue, "tracked:", tracked, "skeleton:", hasSkeleton, "pinch:", pinch, "grip:", grip, "fist:", fist)
+                lastHandTriggerLogTime = now
+            }
+
+            if isLeft {
+                alvr_send_button(WorldTracker.leftTriggerClick, boolVal(triggerClick))
+                alvr_send_button(WorldTracker.leftTriggerValue, scalarVal(triggerValue))
+                alvr_send_button(WorldTracker.leftTriggerSensorValue, scalarVal(triggerValue))
+                alvr_send_button(WorldTracker.leftTriggerTouched, boolVal(triggerTouch))
+
+                alvr_send_button(WorldTracker.leftSqueezeClick, boolVal(gripClick))
+                alvr_send_button(WorldTracker.leftSqueezeValue, scalarVal(gripValue))
+                alvr_send_button(WorldTracker.leftSqueezeSensorValue, scalarVal(gripValue))
+                alvr_send_button(WorldTracker.leftSqueezeTouched, boolVal(gripTouch))
+            }
+            else {
+                alvr_send_button(WorldTracker.rightTriggerClick, boolVal(triggerClick))
+                alvr_send_button(WorldTracker.rightTriggerValue, scalarVal(triggerValue))
+                alvr_send_button(WorldTracker.rightTriggerSensorValue, scalarVal(triggerValue))
+                alvr_send_button(WorldTracker.rightTriggerTouched, boolVal(triggerTouch))
+
+                alvr_send_button(WorldTracker.rightSqueezeClick, boolVal(gripClick))
+                alvr_send_button(WorldTracker.rightSqueezeValue, scalarVal(gripValue))
+                alvr_send_button(WorldTracker.rightSqueezeSensorValue, scalarVal(gripValue))
+                alvr_send_button(WorldTracker.rightSqueezeTouched, boolVal(gripTouch))
+            }
+        }
+
+        func sendStick(_ state: (pinch: Float, grip: Float, fist: Bool, orientation: simd_quatf)?, isLeft: Bool, sensitivity: Float, deadzone: Float) {
+            let isActive = state?.fist ?? false
+            if isLeft {
+                if isActive {
+                    if !leftStickIsActive {
+                        leftStickIsActive = true
+                        leftStickStartOrientation = state?.orientation ?? simd_quatf()
+                    }
                 }
                 else {
-                    alvr_send_button(systemButton, boolVal(false))
-                }
-                
-                if (!systemIsRight) {
-                    alvr_send_button(WorldTracker.leftTriggerClick, boolVal(leftPinchTrigger > 0.7))
-                    alvr_send_button(WorldTracker.leftTriggerValue, scalarVal(leftPinchTrigger))
-                    //alvr_send_button(WorldTracker.rightTriggerClick, boolVal(false))
-                    //alvr_send_button(WorldTracker.rightTriggerValue, scalarVal(0.0))
-                }
-                else {
-                    //alvr_send_button(WorldTracker.leftTriggerClick, boolVal(false))
-                    //alvr_send_button(WorldTracker.leftTriggerValue, scalarVal(0.0))
-                    alvr_send_button(WorldTracker.rightTriggerClick, boolVal(rightPinchTrigger > 0.7))
-                    alvr_send_button(WorldTracker.rightTriggerValue, scalarVal(rightPinchTrigger))
-                }
-                
-                trackingMotions.removeAll(where: {$0.device_id == WorldTracker.deviceIdLeftHand })
-                trackingMotions.removeAll(where: {$0.device_id == WorldTracker.deviceIdRightHand })
-                
-                trackingMotions.append(pinchToAlvrDeviceMotion(.left))
-                trackingMotions.append(pinchToAlvrDeviceMotion(.right))
-                
-                if steamVRInput2p0Enabled {
-                    leftSkeletonDisableHysteresis = skeletonHysteresisForPinches
-                    rightSkeletonDisableHysteresis = skeletonHysteresisForPinches
-                    skeletonLeft = nil
-                    skeletonRight = nil
+                    leftStickIsActive = false
                 }
             }
             else {
-                bothPinchSystemButtonTime = 0.0
-
-                if leftIsPinching {
-                    trackingMotions.removeAll(where: {$0.device_id == WorldTracker.deviceIdLeftHand })
-                    trackingMotions.append(pinchToAlvrDeviceMotion(.left))
-                    alvr_send_button(WorldTracker.leftTriggerClick, boolVal(leftPinchTrigger > 0.7))
-                    alvr_send_button(WorldTracker.leftTriggerValue, scalarVal(leftPinchTrigger))
-                    leftPinchTrigger += pinchTriggerSpeed
-                    if leftPinchTrigger > 1.0 {
-                        leftPinchTrigger = 1.0
-                    }
-                    
-                    if steamVRInput2p0Enabled{
-                        leftSkeletonDisableHysteresis = skeletonHysteresisForPinches
-                        skeletonLeft = nil
+                if isActive {
+                    if !rightStickIsActive {
+                        rightStickIsActive = true
+                        rightStickStartOrientation = state?.orientation ?? simd_quatf()
                     }
                 }
-                else if !leftIsPinching && leftPinchTrigger > 0.0 {
-                    trackingMotions.removeAll(where: {$0.device_id == WorldTracker.deviceIdLeftHand })
-                    trackingMotions.append(pinchToAlvrDeviceMotion(.left))
-                    alvr_send_button(WorldTracker.leftTriggerClick, boolVal(leftPinchTrigger > 0.7))
-                    alvr_send_button(WorldTracker.leftTriggerValue, scalarVal(leftPinchTrigger))
-                    leftPinchTrigger -= pinchTriggerSpeed
-                    if leftPinchTrigger <= pinchTriggerSpeed {
-                        WorldTracker.shared.leftSelectionRayOrigin = simd_float3()
-                        WorldTracker.shared.leftSelectionRayDirection = simd_float3()
-                    }
-                    if leftPinchTrigger < 0.0 {
-                        leftPinchTrigger = 0.0
-                    }
-                    if steamVRInput2p0Enabled {
-                        leftSkeletonDisableHysteresis = skeletonHysteresisForPinches
-                        skeletonLeft = nil
-                    }
-                }
-                
-                if rightIsPinching {
-                    trackingMotions.removeAll(where: {$0.device_id == WorldTracker.deviceIdRightHand })
-                    trackingMotions.append(pinchToAlvrDeviceMotion(.right))
-                    alvr_send_button(WorldTracker.rightTriggerClick, boolVal(rightPinchTrigger > 0.7))
-                    alvr_send_button(WorldTracker.rightTriggerValue, scalarVal(rightPinchTrigger))
-                    rightPinchTrigger += pinchTriggerSpeed
-                    if rightPinchTrigger > 1.0 {
-                        rightPinchTrigger = 1.0
-                    }
-                    
-                    if steamVRInput2p0Enabled {
-                        rightSkeletonDisableHysteresis = skeletonHysteresisForPinches
-                        skeletonRight = nil
-                    }
-                }
-                else if !rightIsPinching && rightPinchTrigger > 0.0 {
-                    trackingMotions.removeAll(where: {$0.device_id == WorldTracker.deviceIdRightHand })
-                    trackingMotions.append(pinchToAlvrDeviceMotion(.right))
-                    alvr_send_button(WorldTracker.rightTriggerClick, boolVal(rightPinchTrigger > 0.7))
-                    alvr_send_button(WorldTracker.rightTriggerValue, scalarVal(rightPinchTrigger))
-                    rightPinchTrigger -= pinchTriggerSpeed
-                    if rightPinchTrigger <= pinchTriggerSpeed {
-                        WorldTracker.shared.rightSelectionRayOrigin = simd_float3()
-                        WorldTracker.shared.rightSelectionRayDirection = simd_float3()
-                    }
-                    if rightPinchTrigger < 0.0 {
-                        rightPinchTrigger = 0.0
-                    }
-                    
-                    if steamVRInput2p0Enabled {
-                        rightSkeletonDisableHysteresis = skeletonHysteresisForPinches
-                        skeletonRight = nil
-                    }
-                }
-                
-                if leftPinchTrigger > 0.0 && !systemIsRight {
-                    alvr_send_button(systemButton, boolVal(false))
-                }
-                else if rightPinchTrigger > 0.0 && systemIsRight {
-                    alvr_send_button(systemButton, boolVal(false))
+                else {
+                    rightStickIsActive = false
                 }
             }
+
+            var value = simd_float2()
+            var forward = simd_float3()
+            if isActive, let orientation = state?.orientation {
+                let start = isLeft ? leftStickStartOrientation : rightStickStartOrientation
+                let delta = orientation * start.inverse
+                forward = delta.act(simd_float3(0.0, 0.0, -1.0))
+                value = simd_float2(forward.x, forward.y) * sensitivity
+                if simd_length(value) < deadzone {
+                    value = simd_float2()
+                }
+                value = simd_clamp(value, simd_float2(repeating: -1.0), simd_float2(repeating: 1.0))
+            }
+            if isLeft {
+                let now = CACurrentMediaTime()
+                if now - lastHandEmuLogTime > 1.0 {
+                    let pinch = String(format: "%.2f", state?.pinch ?? -1.0)
+                    let grip = String(format: "%.2f", state?.grip ?? -1.0)
+                    let stateMissing = state == nil
+                    let valueX = String(format: "%.2f", value.x)
+                    let valueY = String(format: "%.2f", value.y)
+                    let forwardX = String(format: "%.2f", forward.x)
+                    let forwardY = String(format: "%.2f", forward.y)
+                    let forwardZ = String(format: "%.2f", forward.z)
+                    print("hand-emulation-left-stick", "stateMissing:", stateMissing, "tracked:", leftHandTracked, "skeleton:", leftHandHasSkeleton, "active:", isActive, "pinch:", pinch, "grip:", grip, "value:", valueX, valueY, "forward:", forwardX, forwardY, forwardZ)
+                    lastHandEmuLogTime = now
+                }
+            }
+            else {
+                let now = CACurrentMediaTime()
+                if now - lastHandEmuRightLogTime > 1.0 {
+                    let pinch = String(format: "%.2f", state?.pinch ?? -1.0)
+                    let grip = String(format: "%.2f", state?.grip ?? -1.0)
+                    let stateMissing = state == nil
+                    let valueX = String(format: "%.2f", value.x)
+                    let valueY = String(format: "%.2f", value.y)
+                    let forwardX = String(format: "%.2f", forward.x)
+                    let forwardY = String(format: "%.2f", forward.y)
+                    let forwardZ = String(format: "%.2f", forward.z)
+                    print("hand-emulation-right-stick", "stateMissing:", stateMissing, "tracked:", rightHandTracked, "skeleton:", rightHandHasSkeleton, "active:", isActive, "pinch:", pinch, "grip:", grip, "value:", valueX, valueY, "forward:", forwardX, forwardY, forwardZ)
+                    lastHandEmuRightLogTime = now
+                }
+            }
+
+            let length = simd_length(value)
+            let click = length > 0.9
+            if isLeft {
+                alvr_send_button(WorldTracker.leftThumbstickX, scalarVal(value.x))
+                alvr_send_button(WorldTracker.leftThumbstickY, scalarVal(value.y))
+                alvr_send_button(WorldTracker.leftThumbstickTouched, boolVal(isActive))
+                alvr_send_button(WorldTracker.leftThumbstickClick, boolVal(click))
+            }
+            else {
+                alvr_send_button(WorldTracker.rightThumbstickX, scalarVal(value.x))
+                alvr_send_button(WorldTracker.rightThumbstickY, scalarVal(value.y))
+                alvr_send_button(WorldTracker.rightThumbstickTouched, boolVal(isActive))
+                alvr_send_button(WorldTracker.rightThumbstickClick, boolVal(click))
+            }
+        }
+
+        if handEmulationMode == .gripTrigger {
+            bothPinchSystemButtonTime = 0.0
+            leftPinchTrigger = 0.0
+            rightPinchTrigger = 0.0
+            leftStickIsActive = false
+            rightStickIsActive = false
+            sendTriggerAndGrip(leftHandState, isLeft: true)
+            sendTriggerAndGrip(rightHandState, isLeft: false)
         }
         else if handEmulationMode == .joystick || handEmulationMode == .hybrid {
             bothPinchSystemButtonTime = 0.0
             leftPinchTrigger = 0.0
             rightPinchTrigger = 0.0
-            
-            let stickSensitivity: Float = 0.035
+
+            let stickSensitivity: Float = 1.5
             let stickDeadzone: Float = 0.1
-            
-            func sendStick(_ chirality: HandAnchor.Chirality, isPinching: Bool) {
-                let stick = pinchToStickValue(chirality, sensitivity: stickSensitivity)
-                let inDeadzone = stick == nil || simd_length(stick!) < stickDeadzone || !isPinching
-                let value = inDeadzone ? simd_float2() : stick!
-                let length = simd_length(value)
-                let click = length > 0.9
-                if chirality == .left {
-                    alvr_send_button(WorldTracker.leftThumbstickX, scalarVal(value.x))
-                    alvr_send_button(WorldTracker.leftThumbstickY, scalarVal(value.y))
-                    alvr_send_button(WorldTracker.leftThumbstickTouched, boolVal(isPinching))
-                    alvr_send_button(WorldTracker.leftThumbstickClick, boolVal(click))
-                    alvr_send_button(WorldTracker.leftTriggerClick, boolVal(false))
-                    alvr_send_button(WorldTracker.leftTriggerValue, scalarVal(0.0))
-                }
-                else {
-                    alvr_send_button(WorldTracker.rightThumbstickX, scalarVal(value.x))
-                    alvr_send_button(WorldTracker.rightThumbstickY, scalarVal(value.y))
-                    alvr_send_button(WorldTracker.rightThumbstickTouched, boolVal(isPinching))
-                    alvr_send_button(WorldTracker.rightThumbstickClick, boolVal(click))
-                    alvr_send_button(WorldTracker.rightTriggerClick, boolVal(false))
-                    alvr_send_button(WorldTracker.rightTriggerValue, scalarVal(0.0))
-                }
-            }
-            
+
+            sendStick(leftHandState, isLeft: true, sensitivity: stickSensitivity, deadzone: stickDeadzone)
             if handEmulationMode == .joystick {
-                sendStick(.left, isPinching: leftIsPinching)
-                sendStick(.right, isPinching: rightIsPinching)
+                sendStick(rightHandState, isLeft: false, sensitivity: stickSensitivity, deadzone: stickDeadzone)
+                sendTriggerAndGrip(nil, isLeft: true)
+                sendTriggerAndGrip(nil, isLeft: false)
             }
             else {
-                sendStick(.left, isPinching: leftIsPinching)
-                let deltaSinceLastPinch = Float(max(CACurrentMediaTime() - lastPinchSentTime, 0.011))
-                lastPinchSentTime = CACurrentMediaTime()
-                let pinchTriggerSpeed: Float = 0.15 * (deltaSinceLastPinch / 0.011)
-                if rightIsPinching {
-                    alvr_send_button(WorldTracker.rightTriggerClick, boolVal(rightPinchTrigger > 0.7))
-                    alvr_send_button(WorldTracker.rightTriggerValue, scalarVal(rightPinchTrigger))
-                    rightPinchTrigger += pinchTriggerSpeed
-                    if rightPinchTrigger > 1.0 {
-                        rightPinchTrigger = 1.0
-                    }
-                }
-                else if rightPinchTrigger > 0.0 {
-                    alvr_send_button(WorldTracker.rightTriggerClick, boolVal(rightPinchTrigger > 0.7))
-                    alvr_send_button(WorldTracker.rightTriggerValue, scalarVal(rightPinchTrigger))
-                    rightPinchTrigger -= pinchTriggerSpeed
-                    if rightPinchTrigger < 0.0 {
-                        rightPinchTrigger = 0.0
-                    }
-                }
-                else {
-                    alvr_send_button(WorldTracker.rightTriggerClick, boolVal(false))
-                    alvr_send_button(WorldTracker.rightTriggerValue, scalarVal(0.0))
-                }
+                sendStick(nil, isLeft: false, sensitivity: stickSensitivity, deadzone: stickDeadzone)
+                sendTriggerAndGrip(nil, isLeft: true)
+                sendTriggerAndGrip(rightHandState, isLeft: false)
             }
         }
         lastLeftIsPinching = leftIsPinching
         lastRightIsPinching = rightIsPinching
-        
+
         // Handle this after the pinch gestures can override the skeletons
         if skeletonLeft != nil {
             if skeletonLeft!.count >= SteamVRJoints.numberOfJoints.rawValue {
