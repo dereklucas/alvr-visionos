@@ -841,7 +841,8 @@ class Renderer {
             let angle = Float(i) * segmentAngle
             let segmentTransform = baseTransform * rotationZ(angle) * scaleMatrix(simd_float3(repeating: wheelScale))
             drawSegment(segmentTransform, segmentColors[i])
-            if i == modeSwitchSelection {
+            let selection = isLeft ? leftModeSwitchSelection : rightModeSwitchSelection
+            if i == selection {
                 let popTransform = baseTransform * rotationZ(angle) * scaleMatrix(simd_float3(repeating: wheelScale * 1.08))
                 drawSegment(popTransform, highlightColor)
             }
