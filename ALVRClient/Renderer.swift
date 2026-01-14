@@ -625,7 +625,6 @@ class Renderer {
         } else {
             if modeSwitchActive {
                 let selected = HandEmulationMode(rawValue: modeSwitchSelection) ?? .gripTrigger
-                print("hand-emulation-wheel", "apply", selected.rawValue)
                 WorldTracker.shared.setHandEmulationMode(selected)
             }
             modeSwitchActive = false

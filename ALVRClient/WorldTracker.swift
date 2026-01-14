@@ -467,11 +467,6 @@ class WorldTracker {
     var rightPinchTrigger: Float = 0.0
     var rightStickStartOrientation = simd_quatf()
     var rightStickIsActive = false
-    var lastHandEmuLogTime: TimeInterval = 0.0
-    var lastHandTriggerLogTime: TimeInterval = 0.0
-    var lastHandEmuRightLogTime: TimeInterval = 0.0
-    var lastLoggedGamepadSkipMode: HandEmulationMode = .off
-    var lastPsvrLogTime: TimeInterval = 0.0
     
     var lastPinchSentTime = 0.0
     var leftPinchEyeDelta = simd_float3()
@@ -550,7 +545,6 @@ class WorldTracker {
     }
 
     func setHandEmulationMode(_ mode: HandEmulationMode) {
-        print("hand-emulation-mode", "set", mode.rawValue)
         handEmulationMode = mode
         let enableHands = mode != .off
         ALVRClientApp.gStore.settings.emulatedPinchInteractions = enableHands
@@ -569,7 +563,6 @@ class WorldTracker {
         case .joystick, .gripTrigger, .hybrid:
             profileId = WorldTracker.questInteractionProfile
         }
-        print("hand-emulation-profile", "mode:", mode.rawValue, "profileId:", profileId)
         alvr_send_active_interaction_profile(WorldTracker.deviceIdLeftHand, profileId)
         alvr_send_active_interaction_profile(WorldTracker.deviceIdRightHand, profileId)
         sendCustomInteractionProfile()
@@ -611,7 +604,6 @@ class WorldTracker {
             alvr_send_custom_interaction_profile(WorldTracker.deviceIdLeftHand, base, UInt64(buffer.count))
             alvr_send_custom_interaction_profile(WorldTracker.deviceIdRightHand, base, UInt64(buffer.count))
         }
-        print("hand-emulation-custom-profile", "inputs:", inputIds.count)
     }
     
     func initializeAr() async  {
@@ -1806,13 +1798,8 @@ class WorldTracker {
     
     func sendGamepadInputs() {
         if handEmulationMode != .off {
-            if lastLoggedGamepadSkipMode != handEmulationMode {
-                print("hand-emulation-gamepad-skip", "mode:", handEmulationMode.rawValue)
-                lastLoggedGamepadSkipMode = handEmulationMode
-            }
             return
         }
-        lastLoggedGamepadSkipMode = .off
         func boolVal(_ val: Bool) -> AlvrButtonValue {
             return AlvrButtonValue(tag: ALVR_BUTTON_VALUE_BINARY, AlvrButtonValue.__Unnamed_union___Anonymous_field1(AlvrButtonValue.__Unnamed_union___Anonymous_field1.__Unnamed_struct___Anonymous_field0(binary: val)))
         }
@@ -2018,16 +2005,6 @@ class WorldTracker {
                         alvr_send_button(WorldTracker.leftSystemTouched, boolVal(buttons["Button Menu"]?.touchedInput?.isTouched ?? false))
                         alvr_send_button(WorldTracker.leftMenuClick, boolVal(buttons["Button Menu"]?.pressedInput.isPressed ?? false))
                         alvr_send_button(WorldTracker.leftSystemClick, boolVal(buttons["Button Menu"]?.pressedInput.isPressed ?? false))
-
-                        let now = CACurrentMediaTime()
-                        if now - lastPsvrLogTime > 1.0 {
-                            let lx = String(format: "%.2f", dpads["Thumbstick"]?.xAxis.value ?? 0.0)
-                            let ly = String(format: "%.2f", dpads["Thumbstick"]?.yAxis.value ?? 0.0)
-                            let trig = String(format: "%.2f", buttons["Trigger"]?.pressedInput.value ?? 0.0)
-                            let grip = buttons["Grip"]?.pressedInput.isPressed ?? false
-                            print("psvr2-left", "stick:", lx, ly, "trigger:", trig, "grip:", grip)
-                            lastPsvrLogTime = now
-                        }
 
                     }
                     else {
@@ -2919,19 +2896,6 @@ class WorldTracker {
             let triggerTouch = triggerValue > 0.1
             let gripClick = gripValue > 0.7
             let gripTouch = gripValue > 0.1
-            let now = CACurrentMediaTime()
-            if now - lastHandTriggerLogTime > 1.0 {
-                let handLabel = isLeft ? "left" : "right"
-                let pinch = String(format: "%.2f", state?.pinch ?? -1.0)
-                let grip = String(format: "%.2f", state?.grip ?? -1.0)
-                let fist = state?.fist ?? false
-                let mode = handEmulationMode
-                let tracked = isLeft ? leftHandTracked : rightHandTracked
-                let hasSkeleton = isLeft ? leftHandHasSkeleton : rightHandHasSkeleton
-                print("hand-emulation-trigger", handLabel, "mode:", mode.rawValue, "tracked:", tracked, "skeleton:", hasSkeleton, "pinch:", pinch, "grip:", grip, "fist:", fist)
-                lastHandTriggerLogTime = now
-            }
-
             if isLeft {
                 alvr_send_button(WorldTracker.leftTriggerClick, boolVal(triggerClick))
                 alvr_send_button(WorldTracker.leftTriggerValue, scalarVal(triggerValue))
@@ -2992,36 +2956,6 @@ class WorldTracker {
                     value = simd_float2()
                 }
                 value = simd_clamp(value, simd_float2(repeating: -1.0), simd_float2(repeating: 1.0))
-            }
-            if isLeft {
-                let now = CACurrentMediaTime()
-                if now - lastHandEmuLogTime > 1.0 {
-                    let pinch = String(format: "%.2f", state?.pinch ?? -1.0)
-                    let grip = String(format: "%.2f", state?.grip ?? -1.0)
-                    let stateMissing = state == nil
-                    let valueX = String(format: "%.2f", value.x)
-                    let valueY = String(format: "%.2f", value.y)
-                    let forwardX = String(format: "%.2f", forward.x)
-                    let forwardY = String(format: "%.2f", forward.y)
-                    let forwardZ = String(format: "%.2f", forward.z)
-                    print("hand-emulation-left-stick", "stateMissing:", stateMissing, "tracked:", leftHandTracked, "skeleton:", leftHandHasSkeleton, "active:", isActive, "pinch:", pinch, "grip:", grip, "value:", valueX, valueY, "forward:", forwardX, forwardY, forwardZ)
-                    lastHandEmuLogTime = now
-                }
-            }
-            else {
-                let now = CACurrentMediaTime()
-                if now - lastHandEmuRightLogTime > 1.0 {
-                    let pinch = String(format: "%.2f", state?.pinch ?? -1.0)
-                    let grip = String(format: "%.2f", state?.grip ?? -1.0)
-                    let stateMissing = state == nil
-                    let valueX = String(format: "%.2f", value.x)
-                    let valueY = String(format: "%.2f", value.y)
-                    let forwardX = String(format: "%.2f", forward.x)
-                    let forwardY = String(format: "%.2f", forward.y)
-                    let forwardZ = String(format: "%.2f", forward.z)
-                    print("hand-emulation-right-stick", "stateMissing:", stateMissing, "tracked:", rightHandTracked, "skeleton:", rightHandHasSkeleton, "active:", isActive, "pinch:", pinch, "grip:", grip, "value:", valueX, valueY, "forward:", forwardX, forwardY, forwardZ)
-                    lastHandEmuRightLogTime = now
-                }
             }
 
             let length = simd_length(value)
