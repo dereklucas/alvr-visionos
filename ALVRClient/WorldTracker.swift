@@ -291,6 +291,8 @@ class WorldTracker {
     var lastRightHandTrackerPose: AlvrPose = AlvrPose()
     var lastRightHandTrackerVel: (Float, Float, Float) = (0,0,0)
     var lastRightHandTrackerAngVel: (Float, Float, Float) = (0,0,0)
+    var lastJoyLogTimeLeft: TimeInterval = 0.0
+    var lastJoyLogTimeRight: TimeInterval = 0.0
     
     // Controller haptics
     var leftHapticsStart: TimeInterval = 0
@@ -452,7 +454,7 @@ class WorldTracker {
     var lastLeftIsPinching = false
     var leftPinchTrigger: Float = 0.0
     var bothPinchSystemButtonTime: Float = 0.0
-    var leftStickStartOrientation = simd_quatf()
+    var leftStickStartOrientationApple = simd_quatf()
     var leftStickIsActive = false
     
     var rightSelectionRayId = -1
@@ -465,7 +467,7 @@ class WorldTracker {
     var rightIsPinching = false
     var lastRightIsPinching = false
     var rightPinchTrigger: Float = 0.0
-    var rightStickStartOrientation = simd_quatf()
+    var rightStickStartOrientationApple = simd_quatf()
     var rightStickIsActive = false
     
     var lastPinchSentTime = 0.0
@@ -1525,7 +1527,7 @@ class WorldTracker {
         return max(0.0, min(1.0, curl))
     }
 
-    private func handInputState(_ hand: HandAnchor?) -> (pinch: Float, grip: Float, fist: Bool, orientation: simd_quatf)? {
+    private func handInputState(_ hand: HandAnchor?) -> (pinch: Float, grip: Float, fist: Bool, orientation: simd_quatf, anchorOrientation: simd_quatf)? {
         guard let hand = hand else {
             return nil
         }
@@ -1550,7 +1552,9 @@ class WorldTracker {
         let pinch = max(0.0, min(1.0, (pinchMax - pinchDistance) / (pinchMax - pinchMin)))
 
         let orientation = handAnchorToPose(hand, false).orientation.asQuatf()
-        return (pinch, gripCurl, fist, orientation)
+        let anchorTransform = hand.originFromAnchorTransform
+        let anchorOrientation = simd_quaternion(anchorTransform)
+        return (pinch, gripCurl, fist, orientation, anchorOrientation)
     }
     
     func handAnchorToSkeleton(_ hand: HandAnchor) -> [AlvrPose]? {
@@ -2882,14 +2886,10 @@ class WorldTracker {
         // MARK: - Emulated hand interactions overwrite emulated controller motions
         let leftHandAnchor = handPoses.leftHand
         let rightHandAnchor = handPoses.rightHand
-        let leftHandTracked = leftHandAnchor?.isTracked ?? false
-        let rightHandTracked = rightHandAnchor?.isTracked ?? false
-        let leftHandHasSkeleton = leftHandAnchor?.handSkeleton != nil
-        let rightHandHasSkeleton = rightHandAnchor?.handSkeleton != nil
         let leftHandState = handInputState(leftHandAnchor)
         let rightHandState = handInputState(rightHandAnchor)
 
-        func sendTriggerAndGrip(_ state: (pinch: Float, grip: Float, fist: Bool, orientation: simd_quatf)?, isLeft: Bool) {
+        func sendTriggerAndGrip(_ state: (pinch: Float, grip: Float, fist: Bool, orientation: simd_quatf, anchorOrientation: simd_quatf)?, isLeft: Bool) {
             let triggerValue = state?.pinch ?? 0.0
             let gripValue: Float = (state?.fist ?? false) ? 1.0 : 0.0
             let triggerClick = triggerValue > 0.7
@@ -2920,13 +2920,13 @@ class WorldTracker {
             }
         }
 
-        func sendStick(_ state: (pinch: Float, grip: Float, fist: Bool, orientation: simd_quatf)?, isLeft: Bool, sensitivity: Float, deadzone: Float) {
+        func sendStick(_ state: (pinch: Float, grip: Float, fist: Bool, orientation: simd_quatf, anchorOrientation: simd_quatf)?, isLeft: Bool, sensitivity: Float, deadzone: Float) {
             let isActive = state?.fist ?? false
             if isLeft {
                 if isActive {
                     if !leftStickIsActive {
                         leftStickIsActive = true
-                        leftStickStartOrientation = state?.orientation ?? simd_quatf()
+                        leftStickStartOrientationApple = state?.anchorOrientation ?? simd_quatf()
                     }
                 }
                 else {
@@ -2937,7 +2937,7 @@ class WorldTracker {
                 if isActive {
                     if !rightStickIsActive {
                         rightStickIsActive = true
-                        rightStickStartOrientation = state?.orientation ?? simd_quatf()
+                        rightStickStartOrientationApple = state?.anchorOrientation ?? simd_quatf()
                     }
                 }
                 else {
@@ -2947,15 +2947,69 @@ class WorldTracker {
 
             var value = simd_float2()
             var forward = simd_float3()
-            if isActive, let orientation = state?.orientation {
-                let start = isLeft ? leftStickStartOrientation : rightStickStartOrientation
-                let delta = orientation * start.inverse
+            var yaw: Float = 0.0
+            var pitch: Float = 0.0
+            if isActive, let anchorOrientation = state?.anchorOrientation {
+                let start = isLeft ? leftStickStartOrientationApple : rightStickStartOrientationApple
+                let delta = anchorOrientation * start.inverse
                 forward = delta.act(simd_float3(0.0, 0.0, -1.0))
-                value = simd_float2(forward.x, forward.y) * sensitivity
+                // Map the current forward vector into the start basis to reduce roll influence.
+                let startRight = start.act(simd_float3(1.0, 0.0, 0.0))
+                let startUp = start.act(simd_float3(0.0, 1.0, 0.0))
+                let currentForward = anchorOrientation.act(simd_float3(0.0, 0.0, -1.0))
+                let yawInput = simd_dot(currentForward, startRight)
+                let pitchInput = -simd_dot(currentForward, startUp)
+                // Map forward/back to X and left/right to Y, flip left-hand X.
+                var x = pitchInput
+                var y = yawInput
+                if isLeft {
+                    x = -x
+                }
+                value = simd_float2(x, y) * sensitivity
+                let deltaForward = forward
+                yaw = atan2f(deltaForward.x, -deltaForward.z)
+                let clampedForwardY = max(-1.0 as Float, min(1.0 as Float, deltaForward.y))
+                pitch = asinf(clampedForwardY)
                 if simd_length(value) < deadzone {
                     value = simd_float2()
                 }
                 value = simd_clamp(value, simd_float2(repeating: -1.0), simd_float2(repeating: 1.0))
+            }
+            if handEmulationMode == .joystick, isActive || simd_length(value) > 0.01 {
+                let now = CACurrentMediaTime()
+                let lastLogTime = isLeft ? lastJoyLogTimeLeft : lastJoyLogTimeRight
+                if now - lastLogTime > 0.1, let anchorOrientation = state?.anchorOrientation {
+                    let start = isLeft ? leftStickStartOrientationApple : rightStickStartOrientationApple
+                    let delta = anchorOrientation * start.inverse
+                    let deltaBasis = simd_float3x3(delta)
+                    let absBasis = simd_float3x3(anchorOrientation)
+                    let vX = String(format: "%.2f", value.x)
+                    let vY = String(format: "%.2f", value.y)
+                    let dF = deltaBasis.columns.2 * -1.0
+                    let dR = deltaBasis.columns.0
+                    let dU = deltaBasis.columns.1
+                    let aF = absBasis.columns.2 * -1.0
+                    let aR = absBasis.columns.0
+                    let aU = absBasis.columns.1
+                    let yawDeg = yaw * 180.0 / .pi
+                    let pitchDeg = pitch * 180.0 / .pi
+                    print("joy-calib", isLeft ? "left" : "right",
+                          "value:", vX, vY,
+                          "yaw:", String(format: "%.1f", yawDeg),
+                          "pitch:", String(format: "%.1f", pitchDeg),
+                          "deltaF:", String(format: "%.2f", dF.x), String(format: "%.2f", dF.y), String(format: "%.2f", dF.z),
+                          "deltaR:", String(format: "%.2f", dR.x), String(format: "%.2f", dR.y), String(format: "%.2f", dR.z),
+                          "deltaU:", String(format: "%.2f", dU.x), String(format: "%.2f", dU.y), String(format: "%.2f", dU.z),
+                          "absF:", String(format: "%.2f", aF.x), String(format: "%.2f", aF.y), String(format: "%.2f", aF.z),
+                          "absR:", String(format: "%.2f", aR.x), String(format: "%.2f", aR.y), String(format: "%.2f", aR.z),
+                          "absU:", String(format: "%.2f", aU.x), String(format: "%.2f", aU.y), String(format: "%.2f", aU.z))
+                    if isLeft {
+                        lastJoyLogTimeLeft = now
+                    }
+                    else {
+                        lastJoyLogTimeRight = now
+                    }
+                }
             }
 
             let length = simd_length(value)

@@ -184,6 +184,9 @@ class EventHandler: ObservableObject {
         fixAudioForDirectStereo()
         if !alvrInitialized {
             print("Initialize ALVR")
+            if let buildStamp = String(validatingUTF8: alvr_build_stamp()) {
+                print("Build stamp:", buildStamp)
+            }
             alvrInitialized = true
             var refreshRates:[Float] = [100, 96, 90]
             

@@ -637,6 +637,8 @@ class Renderer {
             modeSwitchAlpha = 0.0
         }
     }
+
+
     
     private func renderModeSwitchHUD(renderEncoder: MTLRenderCommandEncoder, simdDeviceAnchor: simd_float4x4) {
         if modeSwitchAlpha <= 0.0 {
@@ -825,7 +827,13 @@ class Renderer {
         
         drawDisk(baseTransform * scaleMatrix(simd_float3(repeating: wheelScale * 0.38)),
                  simd_float4(0.08, 0.1, 0.14, 0.85 * modeSwitchAlpha))
-        
+
+        let northSigilTransform = baseTransform
+            * simd_float3(0.0, wheelScale * 0.62, 0.004).asFloat4x4()
+            * rotationZ(Float.pi * 0.25)
+            * scaleMatrix(simd_float3(0.018, 0.018, 1.0))
+        drawQuad(northSigilTransform, simd_float4(0.95, 0.97, 0.98, 0.8 * modeSwitchAlpha))
+
         let selectedAngle = Float(modeSwitchSelection) * segmentAngle
         let indicatorTransform = baseTransform * rotationZ(selectedAngle)
             * simd_float3(0.0, wheelScale * 0.45, 0.004).asFloat4x4()
@@ -1656,7 +1664,7 @@ class Renderer {
         WorldTracker.shared.debuggableMats = []
         WorldTracker.shared.debuggableScales = []
         WorldTracker.shared.unlockDebuggables()
-        
+
         renderModeSwitchHUD(renderEncoder: renderEncoder, simdDeviceAnchor: simdDeviceAnchor)
         
         renderEncoder.popDebugGroup()
