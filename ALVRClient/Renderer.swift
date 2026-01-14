@@ -137,10 +137,14 @@ class Renderer {
     var lastRoundTripRenderTimestamp: Double = 0.0
     var currentYuvTransform: simd_float4x4 = matrix_identity_float4x4
     
-    private var modeSwitchGestureStart: TimeInterval? = nil
-    private var modeSwitchActive = false
-    private var modeSwitchAlpha: Float = 0.0
-    private var modeSwitchSelection = 0
+    private var leftModeSwitchGestureStart: TimeInterval? = nil
+    private var rightModeSwitchGestureStart: TimeInterval? = nil
+    private var leftModeSwitchActive = false
+    private var rightModeSwitchActive = false
+    private var leftModeSwitchAlpha: Float = 0.0
+    private var rightModeSwitchAlpha: Float = 0.0
+    private var leftModeSwitchSelection = 0
+    private var rightModeSwitchSelection = 0
     private let modeSwitchHoldThreshold: TimeInterval = 0.35
     
     // Was curious if it improved; it's still juddery.
@@ -610,57 +614,71 @@ class Renderer {
     }
     
     private func updateModeSwitchState(now: TimeInterval) {
-        let leftPinching = WorldTracker.shared.leftIsPinching
-        let rightPinching = WorldTracker.shared.rightIsPinching
-        let bothPinching = leftPinching && rightPinching
-        
-        if bothPinching {
-            if modeSwitchGestureStart == nil {
-                modeSwitchGestureStart = now
+        func updateForHand(isLeft: Bool) {
+            let palmUpOpen = isLeft ? WorldTracker.shared.leftPalmUpOpen : WorldTracker.shared.rightPalmUpOpen
+            if palmUpOpen {
+                if isLeft {
+                    if leftModeSwitchGestureStart == nil {
+                        leftModeSwitchGestureStart = now
+                    }
+                    if !leftModeSwitchActive, let start = leftModeSwitchGestureStart, now - start > modeSwitchHoldThreshold {
+                        leftModeSwitchActive = true
+                        leftModeSwitchSelection = WorldTracker.shared.leftHandEmulationMode.rawValue
+                    }
+                } else {
+                    if rightModeSwitchGestureStart == nil {
+                        rightModeSwitchGestureStart = now
+                    }
+                    if !rightModeSwitchActive, let start = rightModeSwitchGestureStart, now - start > modeSwitchHoldThreshold {
+                        rightModeSwitchActive = true
+                        rightModeSwitchSelection = WorldTracker.shared.rightHandEmulationMode.rawValue
+                    }
+                }
+            } else {
+                if isLeft {
+                    if leftModeSwitchActive {
+                        let selected = HandEmulationMode(rawValue: leftModeSwitchSelection) ?? .gripTrigger
+                        WorldTracker.shared.setHandEmulationMode(selected, isLeft: true)
+                    }
+                    leftModeSwitchActive = false
+                    leftModeSwitchGestureStart = nil
+                } else {
+                    if rightModeSwitchActive {
+                        let selected = HandEmulationMode(rawValue: rightModeSwitchSelection) ?? .gripTrigger
+                        WorldTracker.shared.setHandEmulationMode(selected, isLeft: false)
+                    }
+                    rightModeSwitchActive = false
+                    rightModeSwitchGestureStart = nil
+                }
             }
-            if !modeSwitchActive, let start = modeSwitchGestureStart, now - start > modeSwitchHoldThreshold {
-                modeSwitchActive = true
-                modeSwitchSelection = WorldTracker.shared.handEmulationMode.rawValue
-            }
-        } else {
-            if modeSwitchActive {
-                let selected = HandEmulationMode(rawValue: modeSwitchSelection) ?? .gripTrigger
-                WorldTracker.shared.setHandEmulationMode(selected)
-            }
-            modeSwitchActive = false
-            modeSwitchGestureStart = nil
         }
-        
-        let targetAlpha: Float = modeSwitchActive ? 1.0 : 0.0
-        modeSwitchAlpha += (targetAlpha - modeSwitchAlpha) * 0.2
-        if modeSwitchAlpha < 0.001 {
-            modeSwitchAlpha = 0.0
+
+        updateForHand(isLeft: true)
+        updateForHand(isLeft: false)
+
+        let leftTargetAlpha: Float = leftModeSwitchActive ? 1.0 : 0.0
+        leftModeSwitchAlpha += (leftTargetAlpha - leftModeSwitchAlpha) * 0.2
+        if leftModeSwitchAlpha < 0.001 {
+            leftModeSwitchAlpha = 0.0
+        }
+        let rightTargetAlpha: Float = rightModeSwitchActive ? 1.0 : 0.0
+        rightModeSwitchAlpha += (rightTargetAlpha - rightModeSwitchAlpha) * 0.2
+        if rightModeSwitchAlpha < 0.001 {
+            rightModeSwitchAlpha = 0.0
         }
     }
 
 
     
-    private func renderModeSwitchHUD(renderEncoder: MTLRenderCommandEncoder, simdDeviceAnchor: simd_float4x4) {
+    private func renderModeSwitchHUD(renderEncoder: MTLRenderCommandEncoder, simdDeviceAnchor: simd_float4x4, isLeft: Bool) {
+        let modeSwitchAlpha = isLeft ? leftModeSwitchAlpha : rightModeSwitchAlpha
         if modeSwitchAlpha <= 0.0 {
             return
         }
-        
-        let leftPinch = WorldTracker.shared.leftPinchCurrentPosition
-        let rightPinch = WorldTracker.shared.rightPinchCurrentPosition
-        let leftRayOrigin = WorldTracker.shared.leftSelectionRayOrigin
-        let rightRayOrigin = WorldTracker.shared.rightSelectionRayOrigin
-        
-        var anchor = leftPinch
-        if WorldTracker.shared.leftIsPinching && WorldTracker.shared.rightIsPinching {
-            anchor = (leftPinch + rightPinch) * 0.5
-        } else if leftPinch == simd_float3() && leftRayOrigin != simd_float3() {
-            anchor = leftRayOrigin
-        } else if rightPinch != simd_float3() {
-            anchor = rightPinch
-        } else if rightRayOrigin != simd_float3() {
-            anchor = rightRayOrigin
-        }
-        
+
+        let anchor = isLeft ? WorldTracker.shared.leftPalmCenter : WorldTracker.shared.rightPalmCenter
+        let palmForward = isLeft ? WorldTracker.shared.leftPalmForward : WorldTracker.shared.rightPalmForward
+
         if anchor.isUnsanitary() || anchor == simd_float3() {
             return
         }
@@ -677,11 +695,11 @@ class Renderer {
         let hudRight = rotation.columns.0.asFloat3()
         let hudUp = rotation.columns.1.asFloat3()
         
-        let pinchDelta = rightPinch - WorldTracker.shared.rightPinchStartPosition
-        let selectDeadzone: Float = 0.015
-        if modeSwitchActive && !pinchDelta.isUnsanitary() {
-            let selectX = simd_dot(pinchDelta, hudRight)
-            let selectY = simd_dot(pinchDelta, hudUp)
+        let selectDeadzone: Float = 0.15
+        let isActive = isLeft ? leftModeSwitchActive : rightModeSwitchActive
+        if isActive && !palmForward.isUnsanitary() {
+            let selectX = simd_dot(palmForward, hudRight)
+            let selectY = simd_dot(palmForward, hudUp)
             let distance = simd_length(simd_float2(selectX, selectY))
             if distance > selectDeadzone {
                 let angle = atan2(selectY, selectX)
@@ -692,7 +710,11 @@ class Renderer {
                     normalized += 2.0 * Float.pi
                 }
                 let idx = Int((normalized + segmentAngle * 0.5) / segmentAngle) % segmentCount
-                modeSwitchSelection = idx
+                if isLeft {
+                    leftModeSwitchSelection = idx
+                } else {
+                    rightModeSwitchSelection = idx
+                }
             }
         }
         
@@ -834,7 +856,8 @@ class Renderer {
             * scaleMatrix(simd_float3(0.018, 0.018, 1.0))
         drawQuad(northSigilTransform, simd_float4(0.95, 0.97, 0.98, 0.8 * modeSwitchAlpha))
 
-        let selectedAngle = Float(modeSwitchSelection) * segmentAngle
+        let selection = isLeft ? leftModeSwitchSelection : rightModeSwitchSelection
+        let selectedAngle = Float(selection) * segmentAngle
         let indicatorTransform = baseTransform * rotationZ(selectedAngle)
             * simd_float3(0.0, wheelScale * 0.45, 0.004).asFloat4x4()
             * scaleMatrix(simd_float3(0.02, 0.08, 1.0))
@@ -844,7 +867,7 @@ class Renderer {
             let angle = Float(i) * segmentAngle
             let iconOffset = simd_float3(cos(angle) * iconRadius, sin(angle) * iconRadius, 0.004)
             let iconTransform = baseTransform * iconOffset.asFloat4x4() * scaleMatrix(simd_float3(repeating: iconScale))
-            let color = (i == modeSwitchSelection) ? iconColor : iconDimColor
+            let color = (i == selection) ? iconColor : iconDimColor
             let label: String
             switch i {
             case 0:
@@ -1665,7 +1688,8 @@ class Renderer {
         WorldTracker.shared.debuggableScales = []
         WorldTracker.shared.unlockDebuggables()
 
-        renderModeSwitchHUD(renderEncoder: renderEncoder, simdDeviceAnchor: simdDeviceAnchor)
+        renderModeSwitchHUD(renderEncoder: renderEncoder, simdDeviceAnchor: simdDeviceAnchor, isLeft: true)
+        renderModeSwitchHUD(renderEncoder: renderEncoder, simdDeviceAnchor: simdDeviceAnchor, isLeft: false)
         
         renderEncoder.popDebugGroup()
         renderEncoder.endEncoding()
@@ -1940,7 +1964,7 @@ class Renderer {
         self.updateGameStateForVideoFrame(whichIdx, drawable: drawable, viewTransforms: viewTransforms, sentViewTangents: sentViewTangents, realViewTangents: realViewTangents, nearZ: nearZ, farZ: farZ, framePose: framePose, simdDeviceAnchor: simdDeviceAnchor)
         
         updateModeSwitchState(now: CACurrentMediaTime())
-        if fadeInOverlayAlpha > 0.0 || WorldTracker.shared.debuggableMats.count > 0 || modeSwitchAlpha > 0.0 {
+        if fadeInOverlayAlpha > 0.0 || WorldTracker.shared.debuggableMats.count > 0 || leftModeSwitchAlpha > 0.0 || rightModeSwitchAlpha > 0.0 {
             // Not super kosher--we need the depth to be correct for the video frame box, but we can't have the view
             // outside of the video frame box be 0.0 depth or it won't get rastered by the compositor at all.
             // So we re-render the frame depth.

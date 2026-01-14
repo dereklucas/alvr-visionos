@@ -307,7 +307,8 @@ class WorldTracker {
     var rightHapticsAmplitude: Float = 0.0
     var rightEngine: CHHapticEngine? = nil
     
-    var handEmulationMode: HandEmulationMode = .gripTrigger
+    var leftHandEmulationMode: HandEmulationMode = .gripTrigger
+    var rightHandEmulationMode: HandEmulationMode = .gripTrigger
     
     // Controller click-together to toggle hand tracking
     var firstControllerClickTime = 0.0
@@ -453,6 +454,9 @@ class WorldTracker {
     var leftIsPinching = false
     var lastLeftIsPinching = false
     var leftPinchTrigger: Float = 0.0
+    var leftPalmCenter = simd_float3()
+    var leftPalmForward = simd_float3()
+    var leftPalmUpOpen = false
     var bothPinchSystemButtonTime: Float = 0.0
     var leftStickStartOrientationApple = simd_quatf()
     var leftStickIsActive = false
@@ -467,6 +471,9 @@ class WorldTracker {
     var rightIsPinching = false
     var lastRightIsPinching = false
     var rightPinchTrigger: Float = 0.0
+    var rightPalmCenter = simd_float3()
+    var rightPalmForward = simd_float3()
+    var rightPalmUpOpen = false
     var rightStickStartOrientationApple = simd_quatf()
     var rightStickIsActive = false
     
@@ -526,7 +533,8 @@ class WorldTracker {
         self.planeDetection = planeDetection
         self.accessoryTracking = nil
         if !ALVRClientApp.gStore.settings.emulatedPinchInteractions {
-            handEmulationMode = .off
+            leftHandEmulationMode = .off
+            rightHandEmulationMode = .off
         }
         
         Task {
@@ -546,9 +554,13 @@ class WorldTracker {
         self.controllersAreDisabledByClickTogether = false
     }
 
-    func setHandEmulationMode(_ mode: HandEmulationMode) {
-        handEmulationMode = mode
-        let enableHands = mode != .off
+    func setHandEmulationMode(_ mode: HandEmulationMode, isLeft: Bool) {
+        if isLeft {
+            leftHandEmulationMode = mode
+        } else {
+            rightHandEmulationMode = mode
+        }
+        let enableHands = (leftHandEmulationMode != .off) || (rightHandEmulationMode != .off)
         ALVRClientApp.gStore.settings.emulatedPinchInteractions = enableHands
         controllersAreDisabledByClickTogether = enableHands
         leftPinchTrigger = 0.0
@@ -1556,6 +1568,32 @@ class WorldTracker {
         let anchorOrientation = simd_quaternion(anchorTransform)
         return (pinch, gripCurl, fist, orientation, anchorOrientation)
     }
+
+    private func palmState(_ hand: HandAnchor) -> (center: simd_float3, normal: simd_float3, forward: simd_float3)? {
+        guard let wrist = jointWorldPosition(hand, .wrist),
+              let indexKnuckle = jointWorldPosition(hand, .indexFingerKnuckle),
+              let littleKnuckle = jointWorldPosition(hand, .littleFingerKnuckle) else {
+            return nil
+        }
+        let center = (wrist + indexKnuckle + littleKnuckle) / 3.0
+        var normal = simd_cross(indexKnuckle - wrist, littleKnuckle - wrist)
+        if simd_length(normal) < 0.001 {
+            return nil
+        }
+        normal = simd_normalize(normal)
+        if hand.chirality == .left {
+            normal *= -1.0
+        }
+        var forward = (indexKnuckle + littleKnuckle) * 0.5 - wrist
+        if let middleTip = jointWorldPosition(hand, .middleFingerTip) {
+            forward = middleTip - wrist
+        }
+        if simd_length(forward) < 0.001 {
+            return nil
+        }
+        forward = simd_normalize(forward)
+        return (center, normal, forward)
+    }
     
     func handAnchorToSkeleton(_ hand: HandAnchor) -> [AlvrPose]? {
         var ret: [AlvrPose] = []
@@ -1801,7 +1839,7 @@ class WorldTracker {
     }
     
     func sendGamepadInputs() {
-        if handEmulationMode != .off {
+        if leftHandEmulationMode != .off || rightHandEmulationMode != .off {
             return
         }
         func boolVal(_ val: Bool) -> AlvrButtonValue {
@@ -2830,7 +2868,7 @@ class WorldTracker {
                 trackingMotions.append(handTrackerMotion)
             }
 
-            if handEmulationMode != .off {
+            if leftHandEmulationMode != .off {
                 trackingMotions.append(handAnchorToAlvrDeviceMotion(leftHand, controllerPredictionTimestamp))
             }
         }
@@ -2848,7 +2886,7 @@ class WorldTracker {
                 trackingMotions.append(handTrackerMotion)
             }
 
-            if handEmulationMode != .off {
+            if rightHandEmulationMode != .off {
                 trackingMotions.append(handAnchorToAlvrDeviceMotion(rightHand, controllerPredictionTimestamp))
             }
         }
@@ -2888,6 +2926,28 @@ class WorldTracker {
         let rightHandAnchor = handPoses.rightHand
         let leftHandState = handInputState(leftHandAnchor)
         let rightHandState = handInputState(rightHandAnchor)
+        leftPalmUpOpen = false
+        rightPalmUpOpen = false
+        if let leftHand = leftHandAnchor, let leftState = leftHandState, let palm = palmState(leftHand) {
+            leftPalmCenter = palm.center
+            leftPalmForward = palm.forward
+            let palmUp = simd_dot(palm.normal, simd_float3(0.0, 1.0, 0.0)) > 0.6
+            let handOpen = leftState.grip < 0.35 && leftState.pinch < 0.2 && !leftState.fist
+            leftPalmUpOpen = palmUp && handOpen
+        } else {
+            leftPalmCenter = simd_float3()
+            leftPalmForward = simd_float3()
+        }
+        if let rightHand = rightHandAnchor, let rightState = rightHandState, let palm = palmState(rightHand) {
+            rightPalmCenter = palm.center
+            rightPalmForward = palm.forward
+            let palmUp = simd_dot(palm.normal, simd_float3(0.0, 1.0, 0.0)) > 0.6
+            let handOpen = rightState.grip < 0.35 && rightState.pinch < 0.2 && !rightState.fist
+            rightPalmUpOpen = palmUp && handOpen
+        } else {
+            rightPalmCenter = simd_float3()
+            rightPalmForward = simd_float3()
+        }
 
         func sendTriggerAndGrip(_ state: (pinch: Float, grip: Float, fist: Bool, orientation: simd_quatf, anchorOrientation: simd_quatf)?, isLeft: Bool) {
             let triggerValue = state?.pinch ?? 0.0
@@ -2975,7 +3035,8 @@ class WorldTracker {
                 }
                 value = simd_clamp(value, simd_float2(repeating: -1.0), simd_float2(repeating: 1.0))
             }
-            if handEmulationMode == .joystick, isActive || simd_length(value) > 0.01 {
+            let activeMode = isLeft ? leftHandEmulationMode : rightHandEmulationMode
+            if activeMode == .joystick, isActive || simd_length(value) > 0.01 {
                 let now = CACurrentMediaTime()
                 let lastLogTime = isLeft ? lastJoyLogTimeLeft : lastJoyLogTimeRight
                 if now - lastLogTime > 0.1, let anchorOrientation = state?.anchorOrientation {
@@ -3028,34 +3089,49 @@ class WorldTracker {
             }
         }
 
-        if handEmulationMode == .gripTrigger {
+        let leftMode = leftHandEmulationMode
+        let rightMode = rightHandEmulationMode
+        if leftMode != .off || rightMode != .off {
             bothPinchSystemButtonTime = 0.0
             leftPinchTrigger = 0.0
             rightPinchTrigger = 0.0
-            leftStickIsActive = false
-            rightStickIsActive = false
-            sendTriggerAndGrip(leftHandState, isLeft: true)
-            sendTriggerAndGrip(rightHandState, isLeft: false)
         }
-        else if handEmulationMode == .joystick || handEmulationMode == .hybrid {
-            bothPinchSystemButtonTime = 0.0
-            leftPinchTrigger = 0.0
-            rightPinchTrigger = 0.0
 
-            let stickSensitivity: Float = 1.5
-            let stickDeadzone: Float = 0.1
+        let stickSensitivity: Float = 1.5
+        let stickDeadzone: Float = 0.1
 
+        switch leftMode {
+        case .gripTrigger:
+            leftStickIsActive = false
+            sendStick(nil, isLeft: true, sensitivity: stickSensitivity, deadzone: stickDeadzone)
+            sendTriggerAndGrip(leftHandState, isLeft: true)
+        case .joystick:
             sendStick(leftHandState, isLeft: true, sensitivity: stickSensitivity, deadzone: stickDeadzone)
-            if handEmulationMode == .joystick {
-                sendStick(rightHandState, isLeft: false, sensitivity: stickSensitivity, deadzone: stickDeadzone)
-                sendTriggerAndGrip(nil, isLeft: true)
-                sendTriggerAndGrip(nil, isLeft: false)
-            }
-            else {
-                sendStick(nil, isLeft: false, sensitivity: stickSensitivity, deadzone: stickDeadzone)
-                sendTriggerAndGrip(nil, isLeft: true)
-                sendTriggerAndGrip(rightHandState, isLeft: false)
-            }
+            sendTriggerAndGrip(nil, isLeft: true)
+        case .hybrid:
+            sendStick(leftHandState, isLeft: true, sensitivity: stickSensitivity, deadzone: stickDeadzone)
+            sendTriggerAndGrip(leftHandState, isLeft: true)
+        case .off:
+            leftStickIsActive = false
+            sendStick(nil, isLeft: true, sensitivity: stickSensitivity, deadzone: stickDeadzone)
+            sendTriggerAndGrip(nil, isLeft: true)
+        }
+
+        switch rightMode {
+        case .gripTrigger:
+            rightStickIsActive = false
+            sendStick(nil, isLeft: false, sensitivity: stickSensitivity, deadzone: stickDeadzone)
+            sendTriggerAndGrip(rightHandState, isLeft: false)
+        case .joystick:
+            sendStick(rightHandState, isLeft: false, sensitivity: stickSensitivity, deadzone: stickDeadzone)
+            sendTriggerAndGrip(nil, isLeft: false)
+        case .hybrid:
+            sendStick(rightHandState, isLeft: false, sensitivity: stickSensitivity, deadzone: stickDeadzone)
+            sendTriggerAndGrip(rightHandState, isLeft: false)
+        case .off:
+            rightStickIsActive = false
+            sendStick(nil, isLeft: false, sensitivity: stickSensitivity, deadzone: stickDeadzone)
+            sendTriggerAndGrip(nil, isLeft: false)
         }
         lastLeftIsPinching = leftIsPinching
         lastRightIsPinching = rightIsPinching
