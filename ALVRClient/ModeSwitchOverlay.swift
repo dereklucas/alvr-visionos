@@ -147,6 +147,11 @@ class ModeSwitchOverlay: ObservableObject {
     ) {
         lastUpdateTime = currentTime
 
+        // Debug logging for gesture detection
+        if leftPalmUp || rightPalmUp {
+            print("[ModeSwitchOverlay] Palm up detected - left:\(leftPalmUp) right:\(rightPalmUp) state:\(state)")
+        }
+
         // Determine which hand (if any) is triggering
         let leftInBox = leftPalmUp && isInShiftingBox(leftWristPosition, headPosition: headPosition)
         let rightInBox = rightPalmUp && isInShiftingBox(rightWristPosition, headPosition: headPosition)
@@ -244,7 +249,7 @@ class ModeSwitchOverlay: ObservableObject {
                 state = .appearing(startTime: currentTime)
                 palmUpStartTime = 0
 
-                print("[ModeSwitchOverlay] Menu appearing at \(menuPosition)")
+                print("[ModeSwitchOverlay] ✨ Menu appearing at \(menuPosition) orientation:\(menuOrientation)")
             }
         } else {
             // Palm lowered - reset timer
@@ -260,6 +265,7 @@ class ModeSwitchOverlay: ObservableObject {
         if currentTime - startTime > appearDuration {
             // Animation complete
             state = .visible
+            print("[ModeSwitchOverlay] ✅ Menu now fully visible")
         }
 
         if !palmUp {
@@ -286,6 +292,7 @@ class ModeSwitchOverlay: ObservableObject {
             if newHovered != hoveredSegment {
                 hoveredSegment = newHovered
                 state = .selecting(hoveredIndex: newHovered)
+                print("[ModeSwitchOverlay] 🎯 Hovering segment \(newHovered)")
             }
         }
     }

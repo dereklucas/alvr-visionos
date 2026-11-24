@@ -65,12 +65,23 @@ func NonlinearToLinearRGB(_ color: simd_float3) -> simd_float3 {
     let DIV1: Float = 1.0 / 1.055;
     let THRESHOLD: Float = 0.04045;
     let GAMMA = simd_float3(repeating: 2.4);
-        
+
     let condition = simd_float3(color.x < THRESHOLD ? 1.0 : 0.0, color.y < THRESHOLD ? 1.0 : 0.0, color.z < THRESHOLD ? 1.0 : 0.0);
     let lowValues = color * DIV12;
     let highValues = pow((color + 0.055) * DIV1, GAMMA);
     return condition * lowValues + (1.0 - condition) * highValues;
 }
+
+// HUD Quad geometry for mode-switch overlay
+let hudQuadVertices:[Float] = [-0.5, -0.5, 0.0,
+                               0.5, -0.5, 0.0,
+                               -0.5, 0.5, 0.0,
+                               0.5, 0.5, 0.0,
+                               0.0, 1.0,
+                               1.0, 1.0,
+                               0.0, 0.0,
+                               1.0, 0.0]
+let hudQuadTexcoordOffset = 12 * MemoryLayout<Float>.size
 
 class Renderer {
 
@@ -100,6 +111,14 @@ class Renderer {
     var videoFrameDepthPipelineState: MTLRenderPipelineState!
     var fullscreenQuadBuffer:MTLBuffer!
     var unitVectorXYZBuffer:MTLBuffer!
+    var hudQuadBuffer: MTLBuffer!
+    var hudSegmentBuffer: MTLBuffer!
+    var hudSegmentVertexCount: Int = 0
+    var hudSegmentTexcoordOffset: Int = 0
+    var hudDiskBuffer: MTLBuffer!
+    var hudDiskVertexCount: Int = 0
+    var hudDiskTexcoordOffset: Int = 0
+    var hudTriangleBuffer: MTLBuffer!
     var encodingGamma: Float = 1.0
     var lastReconfigureTime: Double = 0.0
     
@@ -107,6 +126,14 @@ class Renderer {
     var fadeInOverlayAlpha: Float = 0.0
     var coolPulsingColorsTime: Float = 0.0
     private let chaperoneSystem = ChaperoneSystem()
+    private var radialMenuRenderFrameCount = 0  // Debug logging counter
+
+    // Mode-switch overlay state
+    private var modeSwitchGestureStart: TimeInterval? = nil
+    private var modeSwitchActive = false
+    private var modeSwitchAlpha: Float = 0.0
+    private var modeSwitchSelection = 0
+    private let modeSwitchHoldThreshold: TimeInterval = 0.35
 #if CHAPERONE_PROFILE
     private var chaperoneProfileAccumMs: Double = 0.0
     private var chaperoneProfileSamples: Int = 0
@@ -143,6 +170,45 @@ class Renderer {
 
     // Mode-switch radial menu renderer
     var radialMenuRenderer: RadialMenuRenderer?
+
+    // MARK: - HUD Geometry Generation
+
+    private static func buildHudRingSegmentData(angleStart: Float, angleEnd: Float, innerRadius: Float, outerRadius: Float, steps: Int) -> ([Float], Int, Int) {
+        let safeSteps = max(3, steps)
+        let vertexCount = (safeSteps + 1) * 2
+        var positions: [Float] = []
+        positions.reserveCapacity(vertexCount * 3)
+        for i in 0...safeSteps {
+            let t = Float(i) / Float(safeSteps)
+            let angle = angleStart + (angleEnd - angleStart) * t
+            let c = cos(angle)
+            let s = sin(angle)
+            positions.append(contentsOf: [c * innerRadius, s * innerRadius, 0.0])
+            positions.append(contentsOf: [c * outerRadius, s * outerRadius, 0.0])
+        }
+        var data = positions
+        data.append(contentsOf: Array(repeating: 0.0, count: vertexCount * 2))
+        let texcoordOffset = positions.count * MemoryLayout<Float>.size
+        return (data, vertexCount, texcoordOffset)
+    }
+
+    private static func buildHudDiskData(radius: Float, steps: Int) -> ([Float], Int, Int) {
+        let safeSteps = max(6, steps)
+        let vertexCount = safeSteps * 3
+        var positions: [Float] = []
+        positions.reserveCapacity(vertexCount * 3)
+        for i in 0..<safeSteps {
+            let a0 = Float(i) / Float(safeSteps) * 2.0 * Float.pi
+            let a1 = Float(i + 1) / Float(safeSteps) * 2.0 * Float.pi
+            positions.append(contentsOf: [0.0, 0.0, 0.0])
+            positions.append(contentsOf: [cos(a0) * radius, sin(a0) * radius, 0.0])
+            positions.append(contentsOf: [cos(a1) * radius, sin(a1) * radius, 0.0])
+        }
+        var data = positions
+        data.append(contentsOf: Array(repeating: 0.0, count: vertexCount * 2))
+        let texcoordOffset = positions.count * MemoryLayout<Float>.size
+        return (data, vertexCount, texcoordOffset)
+    }
 
     init(_ layerRenderer: LayerRenderer?) {
         self.layerRenderer = layerRenderer
@@ -230,7 +296,38 @@ class Renderer {
                 depthFormat: layerRenderer?.configuration.depthFormat ?? renderDepthFormat,
                 viewCount: layerRenderer?.properties.viewCount ?? renderViewCount
         )
-        
+
+        // Initialize HUD geometry buffers for mode-switch overlay
+        hudQuadVertices.withUnsafeBytes {
+            hudQuadBuffer = device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
+        }
+
+        let segmentData = Renderer.buildHudRingSegmentData(angleStart: -Float.pi / 4.0,
+                                                           angleEnd: Float.pi / 4.0,
+                                                           innerRadius: 0.55,
+                                                           outerRadius: 1.0,
+                                                           steps: 18)
+        hudSegmentBuffer = device.makeBuffer(bytes: segmentData.0, length: segmentData.0.count * MemoryLayout<Float>.size)
+        hudSegmentVertexCount = segmentData.1
+        hudSegmentTexcoordOffset = segmentData.2
+
+        let diskData = Renderer.buildHudDiskData(radius: 1.0, steps: 22)
+        hudDiskBuffer = device.makeBuffer(bytes: diskData.0, length: diskData.0.count * MemoryLayout<Float>.size)
+        hudDiskVertexCount = diskData.1
+        hudDiskTexcoordOffset = diskData.2
+
+        let triangleVertices: [Float] = [
+            0.0, 0.6, 0.0,
+            -0.5, -0.4, 0.0,
+            0.5, -0.4, 0.0,
+            0.0, 0.0,
+            0.0, 0.0,
+            0.0, 0.0
+        ]
+        triangleVertices.withUnsafeBytes {
+            hudTriangleBuffer = device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)
+        }
+
         rebuildRenderPipelines()
 
         EventHandler.shared.handleRenderStarted()
@@ -293,18 +390,27 @@ class Renderer {
         )
 
         // Initialize radial menu renderer for mode-switch overlay
+        print("[Renderer] Initializing RadialMenuRenderer...")
         if let library = device.makeDefaultLibrary() {
             do {
+                let colorFmt = layerRenderer?.configuration.colorFormat ?? currentRenderColorFormat
+                let depthFmt = layerRenderer?.configuration.depthFormat ?? renderDepthFormat
+                let viewCnt = layerRenderer?.properties.viewCount ?? renderViewCount
+                print("[Renderer] RadialMenuRenderer params - colorFormat:\(colorFmt) depthFormat:\(depthFmt) viewCount:\(viewCnt)")
+
                 radialMenuRenderer = try RadialMenuRenderer(
                     device: device,
                     library: library,
-                    colorFormat: layerRenderer?.configuration.colorFormat ?? currentRenderColorFormat,
-                    depthFormat: layerRenderer?.configuration.depthFormat ?? renderDepthFormat,
-                    viewCount: layerRenderer?.properties.viewCount ?? renderViewCount
+                    colorFormat: colorFmt,
+                    depthFormat: depthFmt,
+                    viewCount: viewCnt
                 )
+                print("[Renderer] ✅ RadialMenuRenderer initialized successfully!")
             } catch {
-                print("[Renderer] Failed to create RadialMenuRenderer: \(error)")
+                print("[Renderer] ❌ Failed to create RadialMenuRenderer: \(error)")
             }
+        } else {
+            print("[Renderer] ❌ Failed to get default Metal library!")
         }
     }
 
@@ -1624,8 +1730,17 @@ class Renderer {
         }
 
         // Render mode-switch radial menu overlay if visible
-        if ModeSwitchOverlay.shared.isVisible, let menuRenderer = radialMenuRenderer {
-            renderRadialMenu(commandBuffer: commandBuffer, renderTargetColor: renderTargetColor, renderTargetDepth: renderTargetDepth, viewports: viewports, rasterizationRateMap: rasterizationRateMap, menuRenderer: menuRenderer)
+        if ModeSwitchOverlay.shared.isVisible {
+            if let menuRenderer = radialMenuRenderer {
+                // Only log occasionally
+                radialMenuRenderFrameCount += 1
+                if radialMenuRenderFrameCount % 30 == 1 {
+                    print("[Renderer] 🎨 Rendering radial menu - position:\(ModeSwitchOverlay.shared.menuPosition) viewports:\(viewports.count)")
+                }
+                renderRadialMenu(commandBuffer: commandBuffer, renderTargetColor: renderTargetColor, renderTargetDepth: renderTargetDepth, viewports: viewports, rasterizationRateMap: rasterizationRateMap, menuRenderer: menuRenderer)
+            } else {
+                print("[Renderer] ⚠️ Overlay is visible but radialMenuRenderer is nil!")
+            }
         }
 
         if !isRealityKit {
@@ -1637,13 +1752,15 @@ class Renderer {
 
     /// Render the mode-switch radial menu overlay
     private func renderRadialMenu(commandBuffer: MTLCommandBuffer, renderTargetColor: MTLTexture, renderTargetDepth: MTLTexture, viewports: [MTLViewport], rasterizationRateMap: MTLRasterizationRateMap?, menuRenderer: RadialMenuRenderer) {
+        // Match working branch's render pass setup for overlays
         let renderPassDescriptor = MTLRenderPassDescriptor()
         renderPassDescriptor.colorAttachments[0].texture = renderTargetColor
         renderPassDescriptor.colorAttachments[0].loadAction = .load
         renderPassDescriptor.colorAttachments[0].storeAction = .store
         renderPassDescriptor.depthAttachment.texture = renderTargetDepth
-        renderPassDescriptor.depthAttachment.loadAction = .load
-        renderPassDescriptor.depthAttachment.storeAction = .store
+        renderPassDescriptor.depthAttachment.loadAction = .clear  // Clear depth for overlay
+        renderPassDescriptor.depthAttachment.storeAction = .dontCare  // Don't need to store
+        renderPassDescriptor.depthAttachment.clearDepth = 0.0
         renderPassDescriptor.renderTargetArrayLength = viewports.count
 
         if let rasterizationRateMap = rasterizationRateMap {
@@ -1656,7 +1773,8 @@ class Renderer {
 
         renderEncoder.label = "RadialMenuEncoder"
         renderEncoder.setViewports(viewports)
-        renderEncoder.setDepthStencilState(depthStateGreater)
+        // Use "always" depth test so overlay renders on top regardless of depth buffer
+        renderEncoder.setDepthStencilState(depthStateAlways)
         renderEncoder.setCullMode(.none)
 
         menuRenderer.render(
@@ -1668,5 +1786,36 @@ class Renderer {
         )
 
         renderEncoder.endEncoding()
+    }
+
+    // MARK: - Mode Switch Overlay
+
+    private func updateModeSwitchState(now: TimeInterval) {
+        // Use ModeSwitchOverlay state instead of pinch gesture
+        let overlayVisible = ModeSwitchOverlay.shared.isVisible
+
+        if overlayVisible {
+            if modeSwitchGestureStart == nil {
+                modeSwitchGestureStart = now
+            }
+            if !modeSwitchActive, let start = modeSwitchGestureStart, now - start > 0.0 {
+                modeSwitchActive = true
+                modeSwitchSelection = InputLayerManager.shared.currentLayerIndex
+            }
+        } else {
+            if modeSwitchActive {
+                if let layer = InputLayerManager.shared.layer(at: modeSwitchSelection) {
+                    InputLayerManager.shared.selectLayer(layer)
+                }
+            }
+            modeSwitchActive = false
+            modeSwitchGestureStart = nil
+        }
+
+        let targetAlpha: Float = modeSwitchActive ? 1.0 : 0.0
+        modeSwitchAlpha += (targetAlpha - modeSwitchAlpha) * 0.2
+        if modeSwitchAlpha < 0.001 {
+            modeSwitchAlpha = 0.0
+        }
     }
 }

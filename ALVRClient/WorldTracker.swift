@@ -1118,11 +1118,13 @@ class WorldTracker {
             wristTransform.columns.1.z
         ))
 
-        // Adjust for hand chirality - left and right hands have mirrored normals
-        if hand.chirality == .left {
-            // Left hand palm normal points in opposite direction
+        // Adjust for hand chirality - the wrist Y-axis points OUT of the palm
+        // So for palm-up detection, we need to invert for right hand
+        if hand.chirality == .right {
+            // Right hand: Y-axis points out from back of hand, so invert
             palmNormal = -palmNormal
         }
+        // Left hand: Y-axis already points out from palm, keep as-is
 
         // Check if palm is facing up (dot product with up vector)
         let upVector = simd_float3(0, 1, 0)
@@ -1145,6 +1147,9 @@ class WorldTracker {
             leftPalmUp = isPalmUp
             leftPalmNormal = palmNormal
             leftWristWorldPosition = wristPos
+            if isPalmUp {
+                print("[WorldTracker] 👋 Left palm UP detected at \(wristPos)")
+            }
         } else {
             leftPalmUp = false
         }
@@ -1155,6 +1160,9 @@ class WorldTracker {
             rightPalmUp = isPalmUp
             rightPalmNormal = palmNormal
             rightWristWorldPosition = wristPos
+            if isPalmUp {
+                print("[WorldTracker] 👋 Right palm UP detected at \(wristPos)")
+            }
         } else {
             rightPalmUp = false
         }

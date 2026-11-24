@@ -20,9 +20,14 @@ class RadialMenuRenderer {
     /// Number of triangles for the center circle
     private let centerTriangles = 32
 
+    /// Debug logging state
+    private var frameCount = 0
+    private var loggedStereoSetup = false
+
     init(device: MTLDevice, library: MTLLibrary, colorFormat: MTLPixelFormat, depthFormat: MTLPixelFormat, viewCount: Int) throws {
         self.device = device
 
+        print("[RadialMenuRenderer] Creating segment pipeline...")
         // Create segment pipeline
         segmentPipelineState = try RadialMenuRenderer.buildPipeline(
             device: device,
@@ -33,7 +38,9 @@ class RadialMenuRenderer {
             vertexFunction: "radialMenuVertexShader",
             fragmentFunction: "radialMenuFragmentShader"
         )
+        print("[RadialMenuRenderer] ✅ Segment pipeline created")
 
+        print("[RadialMenuRenderer] Creating center pipeline...")
         // Create center indicator pipeline
         centerPipelineState = try RadialMenuRenderer.buildPipeline(
             device: device,
@@ -44,11 +51,13 @@ class RadialMenuRenderer {
             vertexFunction: "radialMenuCenterVertexShader",
             fragmentFunction: "radialMenuCenterFragmentShader"
         )
+        print("[RadialMenuRenderer] ✅ Center pipeline created")
 
         // Create uniform buffer (256-byte aligned)
         let alignedSize = (MemoryLayout<RadialMenuUniforms>.size + 0xFF) & ~0xFF
         uniformBuffer = device.makeBuffer(length: alignedSize, options: .storageModeShared)
         uniformBuffer.label = "RadialMenuUniforms"
+        print("[RadialMenuRenderer] ✅ Uniform buffer created (size: \(alignedSize))")
     }
 
     private static func buildPipeline(
@@ -63,13 +72,23 @@ class RadialMenuRenderer {
         let pipelineDescriptor = MTLRenderPipelineDescriptor()
         pipelineDescriptor.label = "RadialMenu_\(vertexFunction)"
 
-        guard let vertexFunc = library.makeFunction(name: vertexFunction),
-              let fragmentFunc = library.makeFunction(name: fragmentFunction) else {
+        guard let vertexFunc = library.makeFunction(name: vertexFunction) else {
+            print("[RadialMenuRenderer] ❌ Failed to find vertex function: \(vertexFunction)")
             throw RendererError.badVertexDescriptor
         }
 
+        guard let fragmentFunc = library.makeFunction(name: fragmentFunction) else {
+            print("[RadialMenuRenderer] ❌ Failed to find fragment function: \(fragmentFunction)")
+            throw RendererError.badVertexDescriptor
+        }
+
+        print("[RadialMenuRenderer] Found shader functions: \(vertexFunction), \(fragmentFunction)")
+
         pipelineDescriptor.vertexFunction = vertexFunc
         pipelineDescriptor.fragmentFunction = fragmentFunc
+
+        // Required for vertex amplification with render_target_array_index
+        pipelineDescriptor.inputPrimitiveTopology = .triangle
 
         // Color attachment with alpha blending
         pipelineDescriptor.colorAttachments[0].pixelFormat = colorFormat
@@ -102,6 +121,12 @@ class RadialMenuRenderer {
         viewports: [MTLViewport]
     ) {
         guard overlay.isVisible else { return }
+
+        // Only log occasionally to avoid spam (every 30 frames)
+        frameCount += 1
+        if frameCount % 30 == 1 {
+            print("[RadialMenuRenderer] 🖼️ Rendering menu - segments:\(overlay.segmentCount) hovered:\(overlay.hoveredSegment) progress:\(overlay.appearProgress(currentTime: currentTime))")
+        }
 
         // Build model matrix from overlay position/orientation
         var modelMatrix = matrix_identity_float4x4
@@ -138,6 +163,11 @@ class RadialMenuRenderer {
         memcpy(uniformBuffer.contents(), &uniforms, MemoryLayout<RadialMenuUniforms>.size)
 
         // Setup vertex amplification for stereo rendering
+        if !loggedStereoSetup {
+            print("[RadialMenuRenderer] Setting up stereo - viewports.count: \(viewports.count)")
+            loggedStereoSetup = true
+        }
+
         if viewports.count > 1 {
             var viewMappings = (0..<viewports.count).map {
                 MTLVertexAmplificationViewMapping(
@@ -146,6 +176,13 @@ class RadialMenuRenderer {
                 )
             }
             encoder.setVertexAmplificationCount(viewports.count, viewMappings: &viewMappings)
+            if !loggedStereoSetup {
+                print("[RadialMenuRenderer] ✅ Vertex amplification enabled for \(viewports.count) views")
+            }
+        } else {
+            if !loggedStereoSetup {
+                print("[RadialMenuRenderer] ⚠️ Only 1 viewport - stereo disabled!")
+            }
         }
 
         encoder.pushDebugGroup("RadialMenu")
